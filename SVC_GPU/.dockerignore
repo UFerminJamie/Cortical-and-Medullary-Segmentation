@@ -1,0 +1,17 @@
+# Allowlist keeps research data, credentials, state, and environments out of builds.
+**
+!__init__.py
+!config.py
+!data.py
+!manifest.py
+!outputs.py
+!evaluation.py
+!gpu_model.py
+!human_loop/
+!human_loop/*.py
+!human_loop/requirements.lock
+!human_loop/static/
+!human_loop/static/**
+!human_loop/scripts/
+!human_loop/scripts/*.sh
+!human_loop/scripts/generate_demo.py

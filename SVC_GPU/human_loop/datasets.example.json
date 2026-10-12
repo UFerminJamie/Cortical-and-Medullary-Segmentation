@@ -1,0 +1,3 @@
+[
+  {"id": "kidney", "name": "Kidney cohort", "manifest": "kidney/manifest.xlsx", "predictions": "kidney/outputs"}
+]

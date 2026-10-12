@@ -1,0 +1,46 @@
+Bootstrap: docker
+From: docker.io/library/python@sha256:23f63358922e79a794f71be8f3723c84e5ccca9638af3f74456dc73d6184499e
+
+%files
+    __init__.py /opt/histoloop/SVC_GPU/__init__.py
+    config.py /opt/histoloop/SVC_GPU/config.py
+    data.py /opt/histoloop/SVC_GPU/data.py
+    manifest.py /opt/histoloop/SVC_GPU/manifest.py
+    outputs.py /opt/histoloop/SVC_GPU/outputs.py
+    evaluation.py /opt/histoloop/SVC_GPU/evaluation.py
+    gpu_model.py /opt/histoloop/SVC_GPU/gpu_model.py
+    human_loop/__init__.py /opt/histoloop/SVC_GPU/human_loop/__init__.py
+    human_loop/annotations.py /opt/histoloop/SVC_GPU/human_loop/annotations.py
+    human_loop/bulk.py /opt/histoloop/SVC_GPU/human_loop/bulk.py
+    human_loop/cache.py /opt/histoloop/SVC_GPU/human_loop/cache.py
+    human_loop/catalog.py /opt/histoloop/SVC_GPU/human_loop/catalog.py
+    human_loop/config.py /opt/histoloop/SVC_GPU/human_loop/config.py
+    human_loop/geometry.py /opt/histoloop/SVC_GPU/human_loop/geometry.py
+    human_loop/grid.py /opt/histoloop/SVC_GPU/human_loop/grid.py
+    human_loop/jobs.py /opt/histoloop/SVC_GPU/human_loop/jobs.py
+    human_loop/performance.py /opt/histoloop/SVC_GPU/human_loop/performance.py
+    human_loop/server.py /opt/histoloop/SVC_GPU/human_loop/server.py
+    human_loop/snapshots.py /opt/histoloop/SVC_GPU/human_loop/snapshots.py
+    human_loop/storage.py /opt/histoloop/SVC_GPU/human_loop/storage.py
+    human_loop/transport.py /opt/histoloop/SVC_GPU/human_loop/transport.py
+    human_loop/worker.py /opt/histoloop/SVC_GPU/human_loop/worker.py
+    human_loop/wsi.py /opt/histoloop/SVC_GPU/human_loop/wsi.py
+    human_loop/requirements.lock /opt/histoloop/requirements.lock
+    human_loop/static /opt/histoloop/SVC_GPU/human_loop/static
+    human_loop/scripts /opt/histoloop/SVC_GPU/human_loop/scripts
+
+%post
+    python -m pip install --no-cache-dir pip==25.2
+    python -m pip install --no-cache-dir -r /opt/histoloop/requirements.lock
+    mkdir -p /data /state /cache
+
+%environment
+    export PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/opt/histoloop
+    export HISTOLOOP_HOST=127.0.0.1 HISTOLOOP_PORT=8765
+    export HISTOLOOP_ORIGINAL_MANIFEST=/data/case_split.xlsx
+
+%runscript
+    exec /bin/bash /opt/histoloop/SVC_GPU/human_loop/scripts/container_entrypoint.sh "$@"
+
+%test
+    python -c "import fastapi, uvicorn, torch, tiffslide; from SVC_GPU.human_loop.server import create_app"

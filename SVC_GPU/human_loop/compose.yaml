@@ -1,0 +1,33 @@
+services:
+  histoloop:
+    image: histoloop:latest
+    platform: linux/amd64
+    build:
+      context: ..
+      dockerfile: human_loop/Dockerfile
+    user: "${HISTOLOOP_UID:-10001}:${HISTOLOOP_GID:-10001}"
+    ports:
+      - "127.0.0.1:${HISTOLOOP_PORT:-8765}:8765"
+    environment:
+      HISTOLOOP_HOST: 0.0.0.0
+      HISTOLOOP_PORT: 8765
+      HISTOLOOP_ORIGINAL_MANIFEST: /data/case_split.xlsx
+    volumes:
+      - type: bind
+        source: ${HISTOLOOP_DATA_ROOT:?Set HISTOLOOP_DATA_ROOT in .env}
+        target: /data
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HISTOLOOP_STATE_DIR:?Set HISTOLOOP_STATE_DIR in .env}
+        target: /state
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /cache:mode=1777,size=768m
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    stop_grace_period: 30s

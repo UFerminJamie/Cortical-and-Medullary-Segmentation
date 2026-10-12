@@ -1,0 +1,5 @@
+# Optional verification tools; not part of the production image.
+pytest==8.3.5
+httpx==0.28.1
+playwright==1.51.0
+matplotlib==3.10.6

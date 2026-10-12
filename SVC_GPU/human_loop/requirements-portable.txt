@@ -1,0 +1,13 @@
+# CPU review runtime (Linux x86_64); GPU workers retain their RAPIDS environment.
+--extra-index-url https://download.pytorch.org/whl/cpu
+fastapi==0.115.12
+uvicorn==0.34.2
+numpy==2.2.6
+pandas==2.3.3
+torch==2.8.0+cpu
+scipy==1.15.3
+Pillow==11.3.0
+tiffslide==2.5.1
+tifffile==2025.5.10
+openpyxl==3.1.5
+scikit-learn==1.7.2

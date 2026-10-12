@@ -1,0 +1,13 @@
+/* Presentation only: image tiles, workers, and overlay rendering stay unchanged. */
+.brand{font-size:20px;letter-spacing:-.5px;font-weight:650}
+.brand small{font-size:9px;letter-spacing:1.5px}
+.brand-mark{height:34px;width:34px;background:#203b35;border-color:#43695b}
+.panel-heading h1{font-size:19px;letter-spacing:-.3px}
+.queue-model-label,.field-label{font-size:11px;line-height:1.5}
+.queue-filters select,.queue-model-label select{font-size:11px;min-height:32px}
+.section-title{letter-spacing:.2px}.muted{line-height:1.65}
+.annotation-hint{line-height:1.65}.queue-footer{gap:7px}
+button:disabled{cursor:default}button:focus-visible,select:focus-visible,input:focus-visible,a:focus-visible{outline:2px solid #a7edc6;outline-offset:3px}
+.empty-state{line-height:1.65;padding:20px}.loading{font-size:13px}
+.tool.active{box-shadow:inset 0 0 0 1px #a7edc6}
+@media(max-width:850px){.brand{font-size:18px}.inspector{top:var(--header-height,66px)}}
