@@ -72,8 +72,10 @@ on a 11,986-tile slide (111,607 × 41,957 pixels). That baseline changed score
 visibility, whereas this feature reclassifies an aggregate field; they are not
 equivalent workloads. After baseline measurement, the interaction targets were
 p95 below 200 ms for cached simple aggregation and 500 ms for bounded CRF, with
-an inexpensive mean preview during dragging. The two measured slides met those
-targets. These are interaction timings, not a 60 FPS claim.
+an inexpensive mean preview during dragging. Mean/Gaussian and CRF met those
+targets on both measured slides. Majority voting on slide 1 missed the simple
+aggregation target (226.5 ms p95); its tile votes must be recomputed per threshold.
+These are interaction timings, not a 60 FPS claim.
 
 Feature timings below are p50 / p95 milliseconds from a programmatic threshold
 update to accepted worker output and the next animation frame, 20 updates per
