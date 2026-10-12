@@ -2,7 +2,44 @@
 
 ## 1. System overview
 
-A single FastAPI/Uvicorn process serves static assets and authenticated HTTP APIs. External XLSX manifests identify WSIs, PT geometry/embeddings, and prediction CSVs. The browser overlays predictions and replayed human labels on image tiles. Durable state is an append-only JSON event log; SQLite accelerates reads only. Optional GPU jobs execute in separate native processes or Slurm allocations.
+A single FastAPI/Uvicorn process serves static assets and authenticated HTTP APIs. External XLSX manifests identify WSIs, PT geometry/embeddings, and prediction CSVs. The browser overlays predictions, replayed human labels, and polygon files on image tiles. Durable state consists of JSON correction events, working annotation files and registries; SQLite accelerates reads only. Optional GPU jobs execute in separate native processes or Slurm allocations.
+
+Polygon working annotations add a second durable JSON store under a configurable
+annotation root. They remain separate from the event log and training snapshots.
+`annotation_files.py` preserves Histomics/GeoJSON schemas, validates geometry,
+checks SHA-256 revisions, locks samples, and publishes fsynced atomic file writes
+with recoverable versions. `migrate_annotations.py` resolves source cohorts against
+manifest identities and uses a reviewed dry-run plan plus exclusive publication.
+The registry prevents coincident basenames from merging samples across cohorts.
+
+Shapely/GEOS computes exact `M ∩ T` and `(C \ M) ∩ T` vectors from a shared input
+snapshot. `.generation.json` plus staged outputs and backups recover incomplete
+two-file publication. Missing, empty, invalid, stale and current annotations have
+distinct states. The browser never supplies filesystem paths for layer editing.
+
+`annotation-manager.js` uses the existing viewer drawing surface and preferences;
+file drafts cannot create tile-label events. Layer rows defer region lists until
+expansion and paginate at 30 regions. Existing `panels.js` owns disclosures,
+sidebar widths/visibility, drawers, and Focus viewer. The original responsive grid
+and OSD resize lifecycle remain in place.
+
+`prediction-field.js` is shared by the existing worker and fallback. It aggregates
+physical level-zero footprints into bounded typed-array fields. The default mean
+class raster is used at both overview and zoom; raw inspection uses viewport
+outlines/transparent scores. Majority ties use the same thresholded mean rule.
+Gaussian weighting adapts scalar tile evidence. A bounded local Potts CRF uses
+uncalibrated score evidence and a stable RGB thumbnail guide, with component/gap
+constraints and adjustable regularization. Threshold changes reuse score/coverage
+fields and never change baseline predictions or fixed human labels. Worker
+generations discard stale results; one current and one coalesced next filter keep
+queueing bounded. Source buffers are retransferred only when the field identity
+changes. A displayed-field PNG and JSON parameter export are separate derived
+artifacts, not registered inference/training inputs.
+
+See [working annotation design](docs/annotation-workspace.md) for schemas,
+atomicity/recovery contracts, formulas, deployment binds, and resolution/CRF limits.
+See [workspace validation](docs/workspace-validation.md) for real measurements and
+local-only screenshot status.
 
 ## 2. Architecture diagram
 
@@ -18,6 +55,8 @@ flowchart LR
     C --> I
     C --> R[Node-local SQLite / NPZ cache]
     A --> S[JSON events and registries]
+    A --> F[Working JSON files / backups / generation manifests]
+    F --> D[Shapely vector derivation]
     A --> B[CPU bulk-label thread]
     B --> S
     A --> J[Optional native job manager]
@@ -36,9 +75,11 @@ The interface uses HTML, CSS Grid/Flexbox, vanilla JavaScript, and vendored **Op
 | `static/app.js` | Shared state `S`, dataset/slide selection, review tools, HTTP requests |
 | `static/navigation-cache.js` | Bounded slide-view cache, ETags, cancellation, adjacent-view prefetch |
 | `static/tile-engine.js`, `tile-worker.js` | Masks, histograms, spatial indexing, OffscreenCanvas overview rasters |
+| `static/prediction-field.js` | Shared bounded aggregation, score colors, CRF and tissue component masks |
+| `static/annotation-manager.js` | Independent file layers, drafts, vertex editing, saves and versions |
 | `static/panels.js` | Resize/collapse, mobile drawers, keyboard access |
 
-OpenSeadragon uses hardware WebGL when available, with Canvas/HTML fallback; software WebGL is avoided. Separate Canvas 2D layers draw predictions and annotation geometry. Overview rasters avoid repainting every tile; zoomed views draw spatially indexed viewport candidates. Cursor movement redraws only the drawing layer; opacity uses CSS compositing. Workers have fallback paths where OffscreenCanvas is unavailable.
+OpenSeadragon uses hardware WebGL when available, with Canvas/HTML fallback; software WebGL is avoided. Separate Canvas 2D layers draw predictions and annotation geometry. A bounded aggregate raster supplies both overview and zoomed predictions; spatially indexed viewport candidates supply raw inspection and optional outlines. Cursor movement redraws only the drawing layer; opacity uses CSS compositing. Workers use the same math in a main-thread fallback where OffscreenCanvas is unavailable.
 
 The queue is virtualized. Selection/filter state lives in `S` and DOM controls; preferences persist through `/api/preferences` under the reviewer name. Bootstrap initially uses the server login's preferences. Abort controllers and generation checks discard superseded responses. Incomplete/failed regions block unsafe navigation. Analysis consists of a signed score histogram; embedding projections and enrichment are absent.
 
@@ -55,6 +96,9 @@ Entry point: `python -m SVC_GPU.human_loop.server`; tests call `create_app(Confi
 | `GET /api/wsi/{id}.dzi`, `/api/wsi/{id}_files/{level}/{x}_{y}.jpg` | Deep Zoom descriptor and image tiles |
 | `POST /api/slides/{id}/corrections`, `/undo`, `/review` | Edits, undo, completion |
 | `GET /api/slides/{id}/history` | Bounded history with cursor pagination |
+| `GET /api/slides/{id}/annotations`, `GET/PUT /annotations/{layer}` | Missing/present layer discovery, native documents, revision-checked file editing |
+| `POST /api/slides/{id}/annotation-generation`, `GET/POST /annotation-versions/{layer}` | Exact derived geometry and recoverable saved versions |
+| `GET /api/slides/{id}/prediction-tissue`, `/api/wsi/{id}/thumbnail` | Selected vector tissue mask and bounded CRF image guide |
 | `POST /api/bulk-labels/plan`, `/api/bulk-labels` | Revision-frozen bulk preview and writes |
 | `GET/POST /api/jobs`, `GET /api/jobs/{id}/logs` | Optional model job lifecycle |
 | `GET /api/export`, `/api/performance` | Audit ZIP and request/cache metrics |

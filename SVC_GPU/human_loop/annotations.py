@@ -18,6 +18,7 @@ def correction_record(slide, data, labels, ids, payload, polygon):
         "reviewer": payload["reviewer"], "pass_id": payload["pass_id"], "note": str(payload.get("note", ""))[:2000],
         "fingerprint": data["fingerprint"], "model_id": data["model_id"], "prediction_id": data["prediction_id"],
         "prediction_threshold": data["prediction_threshold"], "filters": payload.get("filters", {}),
+        "display_threshold": payload.get('display_threshold', data['prediction_threshold']),
         "visible_only": payload.get("visible_only", True),
         "grid_mode": str(payload.get("grid_mode", "native")), "source_overlap": str(payload.get("source_overlap", "auto")),
         "grid_origin": data.get("grid", {}).get("origin"),

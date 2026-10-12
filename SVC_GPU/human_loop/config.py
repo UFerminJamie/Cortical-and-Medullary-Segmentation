@@ -27,6 +27,9 @@ class Config:
     predictions: str = str(PROJECT / "SVC_GPU/KPMP_inference_outputs")
     datasets_file: str = ""
     cache_dir: str = ""
+    annotation_root: str = ""
+    contour_root: str = ""
+    annotation_sources: str = "[]"
     request_threads: int = 8
     wsi_handles: int = 4
     jpeg_cache_mib: int = 96
@@ -53,6 +56,7 @@ class Config:
         """Portable launch settings; direct Config callers retain legacy defaults."""
         config = cls()
         names = {"datasets_file": "DATASETS_FILE", "manifest": "MANIFEST",
+                 "annotation_root": "ANNOTATION_ROOT", "contour_root": "CONTOUR_ROOT", "annotation_sources": "ANNOTATION_SOURCES",
                  "predictions": "PREDICTIONS", "original_manifest": "ORIGINAL_MANIFEST",
                  "original_features": "ORIGINAL_FEATURES", "baseline_model": "BASELINE_MODEL",
                  "state_dir": "STATE_DIR", "cache_dir": "CACHE_DIR", "python": "WORKER_PYTHON",
