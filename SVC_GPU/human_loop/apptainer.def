@@ -11,6 +11,8 @@ From: docker.io/library/python@sha256:23f63358922e79a794f71be8f3723c84e5ccca9638
     gpu_model.py /opt/histoloop/SVC_GPU/gpu_model.py
     human_loop/__init__.py /opt/histoloop/SVC_GPU/human_loop/__init__.py
     human_loop/annotations.py /opt/histoloop/SVC_GPU/human_loop/annotations.py
+    human_loop/annotation_files.py /opt/histoloop/SVC_GPU/human_loop/annotation_files.py
+    human_loop/migrate_annotations.py /opt/histoloop/SVC_GPU/human_loop/migrate_annotations.py
     human_loop/bulk.py /opt/histoloop/SVC_GPU/human_loop/bulk.py
     human_loop/cache.py /opt/histoloop/SVC_GPU/human_loop/cache.py
     human_loop/catalog.py /opt/histoloop/SVC_GPU/human_loop/catalog.py

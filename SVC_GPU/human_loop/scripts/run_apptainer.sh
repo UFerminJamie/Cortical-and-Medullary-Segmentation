@@ -15,7 +15,21 @@ for path in "$data" "$state" "$cache"; do
   [[ $path != *:* && $path != *,* ]] || { echo "Bind paths cannot contain ':' or ','." >&2; exit 2; }
 done
 # --cleanenv keeps host Python/Conda settings out; Apptainer uses the invoking UID.
+annotation_binds=()
+annotation_env=()
+if [[ -n ${HISTOLOOP_ANNOTATION_ROOT:-} ]]; then
+  [[ -d $HISTOLOOP_ANNOTATION_ROOT && -w $HISTOLOOP_ANNOTATION_ROOT ]] || { echo "Pre-create a writable annotation root." >&2; exit 2; }
+  [[ $HISTOLOOP_ANNOTATION_ROOT != *:* && $HISTOLOOP_ANNOTATION_ROOT != *,* ]] || exit 2
+  annotation_binds+=(--bind "$HISTOLOOP_ANNOTATION_ROOT:/annotations:rw")
+  annotation_env+=(--env HISTOLOOP_ANNOTATION_ROOT=/annotations)
+fi
+if [[ -n ${HISTOLOOP_CONTOUR_ROOT:-} ]]; then
+  [[ -d $HISTOLOOP_CONTOUR_ROOT && $HISTOLOOP_CONTOUR_ROOT != *:* && $HISTOLOOP_CONTOUR_ROOT != *,* ]] || exit 2
+  annotation_binds+=(--bind "$HISTOLOOP_CONTOUR_ROOT:/contours:ro")
+  annotation_env+=(--env HISTOLOOP_CONTOUR_ROOT=/contours)
+fi
 exec "$runtime" exec --cleanenv --no-home \
   --bind "$data:/data:ro,$state:/state:rw,$cache:/cache:rw" \
+  "${annotation_binds[@]}" "${annotation_env[@]}" \
   --env "SLURM_JOB_ID=$SLURM_JOB_ID,HISTOLOOP_HOST=127.0.0.1,HISTOLOOP_PORT=${HISTOLOOP_PORT:-8765},HISTOLOOP_ORIGINAL_MANIFEST=/data/case_split.xlsx" \
   "$image" /bin/bash /opt/histoloop/SVC_GPU/human_loop/scripts/container_entrypoint.sh "$@"

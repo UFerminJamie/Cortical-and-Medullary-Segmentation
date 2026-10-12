@@ -19,13 +19,14 @@ from urllib.parse import urlparse
 
 import numpy as np
 import anyio.to_thread
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .catalog import Catalog
 from .cache import BoundedCache, signature
 from .annotations import correction_record
+from .annotation_files import AnnotationFiles, Document, SOURCE_NAMES
 from .bulk import BulkLabels
 from .config import PACKAGE, Config, allocated_gpu
 from .geometry import filter_mask, region_indices
@@ -51,6 +52,7 @@ def create_app(config: Config | None = None, token: str | None = None) -> FastAP
     responses = BoundedCache(16, config.response_cache_mib * 1024**2)
     timings = RequestMetrics()
     catalog = Catalog(config, store)
+    annotation_files = AnnotationFiles(config, catalog)
     jobs = Jobs(config, store, catalog)
     bulk = BulkLabels(store, catalog)
     if token is None:
@@ -78,6 +80,7 @@ def create_app(config: Config | None = None, token: str | None = None) -> FastAP
     app.state.config, app.state.store, app.state.catalog = config, store, catalog
     app.state.pool, app.state.jobs, app.state.token = pool, jobs, token
     app.state.bulk = bulk
+    app.state.annotation_files = annotation_files
     app.state.responses = responses
     app.add_middleware(ApiCompression, minimum_size=2048, compresslevel=3)
 
@@ -169,6 +172,64 @@ def create_app(config: Config | None = None, token: str | None = None) -> FastAP
         return {"wsi": pool.metrics(), "responses": responses.metrics(),
                 "saved_predictions": catalog._saved_cache.metrics(), "request_threads": config.request_threads,
                 "requests": timings.snapshot(), "peak_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024}
+
+    @app.get('/api/slides/{slide_id}/annotations')
+    def annotation_layers(slide_id: str):
+        annotation_files.recover(slide_id)
+        return annotation_files.list(slide_id)
+
+    @app.get('/api/slides/{slide_id}/annotations/{layer}')
+    def annotation_document(slide_id: str, layer: str):
+        return annotation_files.read(slide_id, layer)
+
+    @app.put('/api/slides/{slide_id}/annotations/{layer}')
+    def annotation_save(slide_id: str, layer: str, payload: dict, background: BackgroundTasks):
+        payload['reviewer'] = actor(payload)
+        result = annotation_files.save(slide_id, layer, payload)
+        if layer in SOURCE_NAMES:
+            background.add_task(annotation_files.regenerate, slide_id)
+        return result
+
+    @app.post('/api/slides/{slide_id}/annotation-generation')
+    def annotation_generation(slide_id: str, payload: dict):
+        actor(payload)
+        return annotation_files.regenerate(slide_id, payload.get('tissue_id'))
+
+    @app.post('/api/annotation-preview')
+    def annotation_preview(payload: dict):
+        actor(payload)
+        return Document(payload['document']).edit(payload.get('operations', []))
+
+    @app.get('/api/slides/{slide_id}/annotation-versions/{layer}')
+    def annotation_versions(slide_id: str, layer: str):
+        return annotation_files.versions(slide_id, layer)
+
+    @app.post('/api/slides/{slide_id}/annotation-versions/{layer}')
+    def annotation_restore(slide_id: str, layer: str, payload: dict, background: BackgroundTasks):
+        payload['reviewer'] = actor(payload)
+        result = annotation_files.restore(slide_id, layer, payload)
+        if layer in SOURCE_NAMES:
+            background.add_task(annotation_files.regenerate, slide_id)
+        return result
+
+    @app.get('/api/slides/{slide_id}/prediction-tissue')
+    def prediction_tissue(slide_id: str):
+        try:
+            identity, path, document = annotation_files.tissue(slide_id)
+            from .annotation_files import checksum
+            return {'status': 'available', 'identity': identity, 'revision': checksum(path), 'geometry': __import__('shapely').geometry.mapping(document.union())}
+        except ValueError as error:
+            return {'status': 'unavailable', 'error': str(error)}
+
+    @app.get('/api/wsi/{slide_id}/thumbnail')
+    def prediction_image_guide(slide_id: str):
+        slide = catalog.slide(slide_id)
+        key = 'guide:' + signature(slide['wsi_path'])
+        image = responses.get(key)
+        if image is None:
+            image = pool.thumbnail(slide['wsi_path'])
+            responses.put(key, image, len(image))
+        return Response(image, media_type='image/jpeg')
 
     @app.get("/")
     def index():
@@ -306,8 +367,12 @@ def create_app(config: Config | None = None, token: str | None = None) -> FastAP
             raise ValueError("Label must be cortex (0), medulla (1), or excluded (-2)")
         polygon = payload.get("polygon", [])
         filters = payload.get("filters", {})
-        effective = np.where(labels != -1, labels, data["predictions"])
-        eligible = filter_mask(data["scores"], effective, labels, filters, data["predictions"]) if payload.get("visible_only", True) else None
+        display_threshold = float(payload.get('display_threshold', data['prediction_threshold']))
+        if not math.isfinite(display_threshold):
+            raise ValueError('Display threshold must be finite')
+        preview_predictions = (data['scores'] >= display_threshold).astype(np.int8)
+        effective = np.where(labels != -1, labels, preview_predictions)
+        eligible = filter_mask(data["scores"], effective, labels, filters, preview_predictions) if payload.get("visible_only", True) else None
         selected_grid = grid_mask(data["coordinates"], data["tile_size"], payload.get("grid_mode", "native"),
                                   payload.get("source_overlap", "auto"), data.get("grid"))
         eligible = selected_grid if eligible is None else eligible & selected_grid
@@ -436,7 +501,7 @@ def main():
     parser.add_argument("--executor", choices=["auto", "slurm", "local"], default=os.environ.get("HISTOLOOP_EXECUTOR", "auto"))
     parser.add_argument("--device", choices=["gpu", "cpu"], default=defaults.device,
                         help="CPU mode reviews slides without a GPU and submits compute jobs through Slurm")
-    for flag in ("state-dir", "manifest", "predictions", "datasets-file", "cache-dir",
+    for flag in ("state-dir", "manifest", "predictions", "datasets-file", "cache-dir", "annotation-root", "contour-root", "annotation-sources",
                  "original-manifest", "original-features", "baseline-model", "account", "qos",
                  "gpu-partition", "gpu-resource", "job-memory", "job-time"):
         parser.add_argument("--" + flag, default=getattr(defaults, flag.replace("-", "_")))
@@ -454,6 +519,7 @@ def main():
                     manifest=str(Path(args.manifest).resolve()), predictions=str(Path(args.predictions).resolve()),
                     datasets_file=str(Path(args.datasets_file).resolve()) if args.datasets_file else "",
                     cache_dir=str(Path(args.cache_dir).resolve()) if args.cache_dir else "",
+                    annotation_root=args.annotation_root, contour_root=args.contour_root, annotation_sources=args.annotation_sources,
                     request_threads=args.request_threads, wsi_handles=args.wsi_handles,
                     jpeg_cache_mib=args.jpeg_cache_mib, prediction_cache_mib=args.prediction_cache_mib,
                     response_cache_mib=args.response_cache_mib,

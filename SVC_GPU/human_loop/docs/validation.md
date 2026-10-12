@@ -1,3 +1,9 @@
+# Annotation workspace update
+
+The 2026-10-12 feature validation, real production migration and local-only real
+screenshots are recorded in [workspace-validation.md](workspace-validation.md).
+The earlier demo-only checks below describe the original release.
+
 # HistoLoop validation
 
 Validation used isolated state and synthetic inputs on a HiPerGator CPU compute

@@ -12,6 +12,8 @@ services:
       HISTOLOOP_HOST: 0.0.0.0
       HISTOLOOP_PORT: 8765
       HISTOLOOP_ORIGINAL_MANIFEST: /data/case_split.xlsx
+      HISTOLOOP_ANNOTATION_ROOT: /annotations
+      HISTOLOOP_CONTOUR_ROOT: /contours
     volumes:
       - type: bind
         source: ${HISTOLOOP_DATA_ROOT:?Set HISTOLOOP_DATA_ROOT in .env}
@@ -22,6 +24,17 @@ services:
       - type: bind
         source: ${HISTOLOOP_STATE_DIR:?Set HISTOLOOP_STATE_DIR in .env}
         target: /state
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HISTOLOOP_ANNOTATION_ROOT:?Set HISTOLOOP_ANNOTATION_ROOT in .env}
+        target: /annotations
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HISTOLOOP_CONTOUR_ROOT:?Set HISTOLOOP_CONTOUR_ROOT in .env}
+        target: /contours
+        read_only: true
         bind:
           create_host_path: false
     tmpfs:

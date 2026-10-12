@@ -12,6 +12,14 @@ HistoLoop is an interactive web application for visualizing whole-slide histopat
 - Autosave, revision checks, correction history, and ZIP audit export.
 - Independent class score filters, score histogram, and saved model/run comparisons.
 - Optional native RAPIDS GPU prediction and retraining from frozen review snapshots.
+- Persistent per-sample JSON annotation files, independent layers, vertex editing,
+  revision checks, recoverable backups, and exact tissue-clipped derived classes.
+- Order-independent mean/vote/Gaussian/CRF overlap display, continuous margin
+  heatmaps, live preview threshold, and collapsible panels with Focus viewer.
+
+Migration, schemas, file editing, prediction methods, container annotation binds,
+and concrete limitations are documented in [Working annotations and prediction review](docs/annotation-workspace.md).
+Executed tests and real-slide timings: [Workspace validation](docs/workspace-validation.md).
 
 Containers support CPU viewing and annotation. GPU execution needs a compatible native RAPIDS environment. Embedding projections and enrichment analysis are not implemented.
 
@@ -30,6 +38,11 @@ Containers support CPU viewing and annotation. GPU execution needs a compatible 
 [ARCHITECTURE.md](ARCHITECTURE.md) explains the implementation.
 
 ## Screenshots
+
+New **real-slide** captures of multi-layer annotation review, vertex editing,
+aggregated heatmaps and Focus viewer were prepared locally and de-identified.
+The owner requested local-only storage; public publication is blocked. These
+private images are excluded from Git. The public gallery below remains synthetic.
 
 Actual application captures at 1600 × 1000 using **synthetic tissue illustrations, random embeddings, and synthetic predictions** from [generate_demo.py](scripts/generate_demo.py). These do not represent patient tissue or model accuracy.
 
@@ -80,7 +93,8 @@ SVC_GPU/
 | Dataset registry | JSON list | Required by launch scripts | Each entry: `id,name,manifest,predictions` | Edit [datasets.example.json](datasets.example.json) |
 | Original split workbook | `.xlsx` | Optional for viewing; required for training | `sample_name,split,case_id`; feature locations for training; `train,val,test` splits | Established case-aware research split |
 | Original labels / model | Paired `.pt/.csv`; RAPIDS `.pkl` + metadata | Only for GPU jobs | Original labels use `1=cortex`, `2=medulla`; compatible encoder/model dimensions | Existing training pipeline and checkpoint |
-| Human annotations | JSON events | Generated | Writable state directory; no database initialization/import required | Annotate in HistoLoop |
+| Tile corrections | JSON events | Generated | Writable state directory; no database initialization required | Review tools |
+| Polygon annotations | Histomics/GeoJSON JSON | Optional | Separate writable annotation root; migrate originals or explicitly create/import | Annotation manager |
 | Masks / GeoJSON | PNG, GeoJSON | No | Optional model outputs; not viewer inputs | Existing inference/export utilities |
 
 Coordinates are **level-zero top-left pixels**. Patches must be square, unique, and nonnegative; CSV coordinates/order must exactly match the PT file. Use trusted PT/model files because PyTorch/pickle payloads are loaded. Missing predictions appear in the queue but need prepared outputs before overlay review.
@@ -261,6 +275,9 @@ This installation's former absolute defaults are preserved in ignored `local_set
 | Variable | Purpose / portable default |
 |---|---|
 | `HISTOLOOP_DATA_ROOT` | Dataset directory; `/data` inside containers |
+| `HISTOLOOP_ANNOTATION_ROOT` | Editable polygon working root; native `<state>/annotations`, container `/annotations` with a writable bind |
+| `HISTOLOOP_CONTOUR_ROOT` | Read-only tissue contour root; `/contours` in configured containers |
+| `HISTOLOOP_ANNOTATION_SOURCES` | JSON array of original Labelled_files roots for migration; read-only |
 | `HISTOLOOP_DATASETS_FILE` | JSON registry; `<data-root>/datasets.json` |
 | `HISTOLOOP_STATE_DIR` | Persistent annotations, jobs, registries, token; `/state` in containers |
 | `HISTOLOOP_CACHE_DIR` | Disposable SQLite/NumPy cache; node-local scratch or `/cache` |
@@ -271,7 +288,7 @@ This installation's former absolute defaults are preserved in ignored `local_set
 | `HISTOLOOP_REQUEST_THREADS`, `HISTOLOOP_WSI_HANDLES` | Request threads / readers: `8` / `4` |
 | `HISTOLOOP_JPEG_CACHE_MIB`, `HISTOLOOP_PREDICTION_CACHE_MIB`, `HISTOLOOP_RESPONSE_CACHE_MIB` | In-memory budgets: `96` / `64` / `48` MiB |
 
-There is no durable SQL database path: cache `index.sqlite3` is disposable. Use one server per workspace and back up the entire state directory.
+There is no durable SQL database path: cache `index.sqlite3` is disposable. Use one server per workspace and back up both the state directory and working annotation root.
 
 ## Troubleshooting
 
