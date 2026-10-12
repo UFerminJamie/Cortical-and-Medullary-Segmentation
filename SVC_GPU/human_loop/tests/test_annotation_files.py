@@ -37,6 +37,9 @@ def test_schema_metadata_holes_multipolygons_roundtrip():
     assert edited['features'][0]['geometry']==value['features'][0]['geometry']
     assert edited['features'][0]['properties']['nested']=={'a':1}
     assert Document(edited).union().equals(Document(value).union())
+    value['features'][0]['id']=0
+    numeric=Document(value).edit([{'action':'rename','id':'0','name':'zero'}])
+    assert numeric['features'][0]['id']==0 and '_histoloop_id' not in numeric['features'][0]
 
 
 def test_histomics_edits_preserve_unrelated_metadata_and_reject_conversion():
@@ -46,6 +49,11 @@ def test_histomics_edits_preserve_unrelated_metadata_and_reject_conversion():
     assert edited['annotation']['elements'][1]==original['annotation']['elements'][1]
     assert edited['annotation']['elements'][0]['lineColor']=='rgb(1,2,3)'
     assert Document(edited).regions()[0]['id']==rid
+    original['annotation']['elements'][0]['_histoloop_id']=rid
+    original['annotation']['elements'][0]['label']={'value':'cortex','metadata':{'keep':True}}
+    renamed=Document(original).edit([{'action':'rename','id':rid,'name':'Region name'}])
+    assert renamed['annotation']['elements'][0]['label']==original['annotation']['elements'][0]['label']
+    assert Document(renamed).regions()[0]['name']=='Region name'
     with pytest.raises(ValueError,match='cannot represent'):
         Document(original).edit([{'action':'replace','id':rid,'geometry':mapping(Polygon([(0,0),(40,0),(40,40),(0,40)],holes=[[(1,1),(2,1),(2,2),(1,2)]]))}])
 
@@ -105,6 +113,9 @@ def test_medulla_priority_holes_components_missing_and_empty(setup):
     assert cg.intersection(mg).area==0
     assert unary_union([cg,mg]).symmetric_difference(unary_union([c,m]).intersection(tissue)).area<1e-8
     assert store.read(sid,'cortical.json')['document']['histoloop']['id']==store.read(sid,'medullary.json')['document']['histoloop']['id']
+    ids=[r['id'] for r in store.read(sid,'cortical.json')['regions']]
+    store.regenerate(sid)
+    assert ids==[r['id'] for r in store.read(sid,'cortical.json')['regions']]
     rev=checksum(store.layer_path(sid,'cortical_gt.json'))
     store.save(sid,'cortical_gt.json',{'revision':rev,'remove':True});store.regenerate(sid)
     assert not store.layer_path(sid,'cortical.json').exists()

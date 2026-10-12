@@ -91,7 +91,9 @@ adds a draft; **Save file** persists it to that exact file. Expand a file to see
 to 30 regions per page. Region actions provide selection, zoom, visibility, vertex
 editing and deletion. The vertex editor exposes every ring/component, optional
 name, numeric coordinates, insertion/removal and pointer dragging. Apply geometry,
-then save the file. Draft undo/redo covers supported edits and deletions. After a
+then save the file. Histomics display names use `_histoloop_name`, preserving any
+native label object/class metadata. Unchanged derived components have geometry-based
+stable IDs across regeneration. Draft undo/redo covers supported edits and deletions. After a
 save, **Saved versions / restore** can recover earlier file contents. Restoring
 creates another recoverable version with a concurrency check.
 

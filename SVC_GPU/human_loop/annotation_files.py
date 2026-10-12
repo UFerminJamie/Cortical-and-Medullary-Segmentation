@@ -60,7 +60,9 @@ class Document:
 
     def identifier(self, i):
         item = self.items[i]
-        return str(item.get('id') or item.get('_histoloop_id') or
+        if item.get('id') is not None:
+            return str(item['id'])
+        return str(item.get('_histoloop_id') or
                    'region-' + hashlib.sha256(json.dumps([i, item], sort_keys=True).encode()).hexdigest()[:20])
 
     def geometry(self, i):
@@ -89,7 +91,7 @@ class Document:
         return result
 
     def regions(self):
-        return [{'id': self.identifier(i), 'name': str(item.get('properties', {}).get('name', item.get('label', ''))),
+        return [{'id': self.identifier(i), 'name': str(item.get('properties', {}).get('name', item.get('_histoloop_name', item.get('label', '')))),
                  'geometry': mapping(self.geometry(i)), 'bounds': list(self.geometry(i).bounds)}
                 for i, item in enumerate(self.items)]
 
@@ -101,7 +103,7 @@ class Document:
             raise ValueError('Supply at most 1000 region operations')
         # Assign persistent IDs before changing indices, including untouched regions.
         for i, item in enumerate(self.items):
-            if not item.get('id') and not item.get('_histoloop_id'):
+            if item.get('id') is None and not item.get('_histoloop_id'):
                 item['_histoloop_id'] = self.identifier(i)
         for op in operations:
             action = op.get('action')
@@ -137,10 +139,10 @@ class Document:
                 if self.kind == 'geojson':
                     item.setdefault('properties', {})['name'] = str(op['name'])[:200]
                 else:
-                    item['label'] = str(op['name'])[:200]
+                    item['_histoloop_name'] = str(op['name'])[:200]
             if action == 'add':
                 self.items.append(item)
-        for key in ('_elementCount', '_detailsCount'):
+        for key in ('_elementCount',):
             if key in self.value:
                 self.value[key] = len(self.items)
         Document(self.value)
@@ -150,7 +152,7 @@ class Document:
 def feature_collection(geometry, provenance):
     polygons = [] if geometry.is_empty else ([geometry] if geometry.geom_type == 'Polygon' else list(geometry.geoms))
     return {'type': 'FeatureCollection', 'histoloop': provenance,
-            'features': [{'type': 'Feature', 'id': uuid.uuid4().hex, 'properties': {}, 'geometry': mapping(p)}
+            'features': [{'type': 'Feature', 'id': hashlib.sha256(p.normalize().wkb).hexdigest()[:24], 'properties': {}, 'geometry': mapping(p)}
                          for p in polygons if p.geom_type == 'Polygon' and not p.is_empty]}
 
 

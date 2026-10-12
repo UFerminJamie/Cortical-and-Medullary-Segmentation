@@ -38,9 +38,11 @@ passed authenticated binary views, WSI tiles, tile corrections, working annotati
 creation, imported tissue, derived regeneration, and persistence after stopping
 and restarting the server with the same state/annotation binds. The current
 feature source was bound read-only over the packaged runtime for these checks.
-Docker is unavailable on this host; a local Docker build was not claimed. The
-existing GitHub container workflow builds and exercises the same expanded smoke
-script when CI runs.
+Docker is unavailable on this host; a local Docker build was not claimed.
+[GitHub Docker CI](https://github.com/UFerminJamie/HistoLoop/actions/runs/38306816981)
+built the CPU image and passed the expanded smoke script and restart persistence
+check. The final schema/identity follow-up also passed 13 targeted Python/browser
+tests; the complete 75-test run preceded that isolated adapter change.
 
 ## Real production migration
 
