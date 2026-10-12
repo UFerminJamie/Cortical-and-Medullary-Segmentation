@@ -43,6 +43,8 @@ Actual application captures at 1600 × 1000 using **synthetic tissue illustratio
 
 [Correction history](docs/screenshots/annotation-history.png)
 
+[Signed score distribution](docs/screenshots/score-distribution.png)
+
 ## Repository structure
 
 ```text
