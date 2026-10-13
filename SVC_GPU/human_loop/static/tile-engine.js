@@ -5,7 +5,7 @@ class TileEngine {
     this.startWorker();
   }
   startWorker() {
-    this.worker=typeof Worker!=="undefined"?new Worker("/static/tile-worker.js?v=8"):null;
+    this.worker=typeof Worker!=="undefined"?new Worker("/static/tile-worker.js?v=9"):null;
     if(this.worker) {
       const worker=this.worker;
       this.worker.onmessage=event=>{
@@ -42,7 +42,6 @@ class TileEngine {
   }
   labels(ids,label){this.worker?.postMessage({type:"labels",ids,label});}
   tissue(geometry,revision){this.worker?.postMessage({type:'tissue',geometry,revision});}
-  guide(image){this.worker?.postMessage({type:'guide',image},[image]);}
   filter(filters) {
     const id=++this.sequence,generation=this.generation;
     return new Promise((resolve,reject)=>{

@@ -145,7 +145,7 @@ def test_generation_partial_publication_recovers_same_snapshot(setup,monkeypatch
 
 
 def test_missing_invalid_or_ambiguous_tissue(setup):
-    store,sid,_=files(setup)
+    store,sid,client=files(setup)
     store.save(sid,'cortical_gt.json',{'revision':None,'document':fc(box(0,0,100,100))})
     assert store.regenerate(sid)['status']=='unavailable'
     assert store.read(sid,'cortical_gt.json')['regions']
@@ -156,6 +156,15 @@ def test_missing_invalid_or_ambiguous_tissue(setup):
     assert 'Select' in store.regenerate(sid)['error']
     selected=next(iter(store.tissue_candidates(sid)))
     assert store.regenerate(sid,selected)['status']=='current'
+    source_path=store.tissue_path(store.tissue_candidates(sid)[selected]);original=source_path.read_bytes()
+    response=client.post(f'/api/slides/{sid}/annotation-tissue-copy',json={'reviewer':'test','tissue_id':selected})
+    assert response.status_code==200,response.text
+    working=store.layer_path(sid,'Tissue_qc.json')
+    assert working.is_file() and store.tissue(sid)[1]==working and source_path.read_bytes()==original
+    current=store.read(sid,'Tissue_qc.json')
+    assert client.put(f'/api/slides/{sid}/annotations/Tissue_qc.json',json={'reviewer':'test','revision':current['revision'],
+        'operations':[{'action':'replace','id':current['regions'][0]['id'],'geometry':mapping(box(1,1,40,40))}]}).status_code==200
+    assert source_path.read_bytes()==original
 
 
 def test_api_create_edit_delete_and_separation(setup):

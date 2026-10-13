@@ -273,6 +273,33 @@ class AnnotationFiles:
             raise ValueError('Tissue path escapes configured contour root')
         return resolved
 
+    def copy_tissue_to_working(self, slide_id, selection, reviewer=None):
+        """Copy a selected configured contour into the editable per-slide tissue file."""
+        candidates = self.tissue_candidates(slide_id)
+        source = candidates.get(str(selection or ''))
+        if source is None:
+            raise ValueError('Select an available tissue mask')
+        source = self.tissue_path(source)
+        folder = self.folder(slide_id)
+        target = self.layer_path(slide_id, 'Tissue_qc.json')
+        if source == target:
+            raise ValueError('Tissue_qc.json is already the editable working layer')
+        result = self.save(slide_id, 'Tissue_qc.json', {
+            'revision': None,
+            'document': Document(read_json(source)).value,
+            'reviewer': reviewer,
+        })
+        working_id = next((key for key, path in self.tissue_candidates(slide_id).items()
+                           if self.tissue_path(path) == target), None)
+        if working_id is None:
+            raise RuntimeError('The editable tissue copy was saved but could not be selected')
+        atomic_json(folder / '.tissue.json', {
+            'id': working_id,
+            'copied_from': source.name,
+            'source_revision': checksum(source),
+        })
+        return {**result, 'tissue_id': working_id, 'source_name': source.name}
+
     def snapshot(self, slide_id, documents=None):
         folder = self.folder(slide_id)
         hashes = {}

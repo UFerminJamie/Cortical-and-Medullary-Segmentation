@@ -43,11 +43,12 @@ def test_training_workspace_and_viewer_controls(setup, monkeypatch):
             page.evaluate('(id)=>loadSlide(id)', sid)
             page.wait_for_function('(id)=>S.detail?.id===id&&!S.loading&&annotations.layers.length', arg=sid)
             assert page.evaluate('annotations.loaded.size') == 0
-            page.locator('#showAllAnnotations').click()
+            page.locator('#toggleAllAnnotations').click()
             page.wait_for_function('annotations.loaded.has("cortical_gt.json")')
             assert page.evaluate('annotations.pref("cortical_gt.json").visible')
-            page.locator('#hideAllAnnotations').click()
-            assert page.evaluate('annotations.layers.every(l=>!annotations.pref(l.id).visible&&!annotations.pref(l.id).expanded)')
+            page.locator('#toggleAllAnnotations').click()
+            assert page.evaluate('annotations.layers.every(l=>!annotations.pref(l.id).visible)')
+            assert page.locator('#toggleAllAnnotations').get_attribute('aria-pressed')=='false'
             # Worker palette changes alter pixels without touching the label field.
             assert page.evaluate("async()=>{$('predictionView').value='aggregate-score';await updateMasks();const labels=Array.from(S.fieldInfo.labels),old=S.raster;const c=document.createElement('canvas');c.width=old.width;c.height=old.height;const ctx=c.getContext('2d');ctx.drawImage(old,0,0);const before=Array.from(ctx.getImageData(0,0,c.width,c.height).data);$('heatmapPalette').value='blue-red';await updateMasks();ctx.drawImage(S.raster,0,0);return JSON.stringify(before)!==JSON.stringify(Array.from(ctx.getImageData(0,0,c.width,c.height).data))&&JSON.stringify(labels)===JSON.stringify(Array.from(S.fieldInfo.labels));}")
             page.locator('#trainButton').click()

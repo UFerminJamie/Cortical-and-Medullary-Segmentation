@@ -7,7 +7,6 @@ const annotations={layers:[],loaded:new Map(),preferences:{},selected:null,editi
     const result=await api('/api/slides/'+slide+'/annotations',{signal});
     if(sequence!==this.sequence||S.detail?.id!==slide)return;
     this.layers=result.layers;this.generation=result.generation;this.tissues=result.tissues;this.selectedTissue=result.selected_tissue;
-    for(const layer of this.layers){const pref=this.pref(layer.id);pref.visible=false;pref.expanded=false;}
     this.render();
     if(sequence===this.sequence){this.render();requestRender();}
   },
@@ -17,13 +16,21 @@ const annotations={layers:[],loaded:new Map(),preferences:{},selected:null,editi
     if((pref.visible||pref.expanded)&&!this.loaded.has(id))try{await this.read(id,S.slideController?.signal);this.render();}catch(e){if(e.name!=='AbortError'){toast(e.message,true);pref.visible=false;this.render();}}
   },
   async all(show){const slide=S.detail?.id;if(!slide)return;const sequence=this.sequence;
-    for(const layer of this.layers){const pref=this.pref(layer.id);pref.visible=show;pref.expanded=show;if(show)pref.hidden={};}
-    if(!show)this.selected=null;this.render();requestRender();schedulePreferences();
+    for(const layer of this.layers)this.pref(layer.id).visible=show;
+    this.render();requestRender();schedulePreferences();
     if(show)for(const layer of this.layers.filter(l=>l.present&&l.status!=='error')){
       if(sequence!==this.sequence||slide!==S.detail?.id)return;
       if(!this.pref(layer.id).visible)continue;
       if(!this.loaded.has(layer.id))try{await this.read(layer.id,S.slideController?.signal);this.render();}catch(e){if(e.name!=='AbortError')toast(layer.name+': '+e.message,true);}
     }
+  },
+  async toggleAll(){const visible=this.layers.length>0&&this.layers.every(layer=>this.pref(layer.id).visible);await this.all(!visible);},
+  async copyTissue(){const slide=S.detail?.id,id=$('tissueChoice').value;if(!slide||!id)return;
+    try{const result=await api('/api/slides/'+slide+'/annotation-tissue-copy',{method:'POST',body:{...actorPayload(),tissue_id:id}});
+      const pref=this.pref('Tissue_qc.json');pref.visible=true;pref.expanded=true;
+      await this.refresh();$('annotationTarget').value='Tissue_qc.json';this.render();
+      toast('Copied tissue mask to editable Tissue_qc.json; source contour preserved.');
+    }catch(error){toast(error.message,true);}
   },
   async read(id,signal){
     const slide=S.detail.id,sequence=this.sequence;
@@ -100,6 +107,9 @@ const annotations={layers:[],loaded:new Map(),preferences:{},selected:null,editi
     if(!S.detail){$('annotationFiles').replaceChildren();return;}
     $('derivationStatus').textContent='Derived: '+(this.generation?.status||'unavailable')+(this.generation?.error?' · '+this.generation.error:'');
     $('tissueChoice').replaceChildren(node('option',{value:'',text:'Select tissue mask'}),...(this.tissues||[]).map(t=>node('option',{value:t.id,text:t.name})));$('tissueChoice').value=this.selectedTissue||'';
+    $('copyTissueMask').disabled=!$('tissueChoice').value||this.layers.some(layer=>layer.id==='Tissue_qc.json'&&layer.present);
+    const allVisible=this.layers.length>0&&this.layers.every(layer=>this.pref(layer.id).visible);
+    $('toggleAllAnnotations').textContent=allVisible?'Hide all annotations':'Show all annotations';$('toggleAllAnnotations').setAttribute('aria-pressed',String(allVisible));
     if($('annotationFiles').closest('[hidden]')||$('inspectorPanel').inert||!$('tab-annotate').classList.contains('active'))return;
     const rows=[];
     for(const layer of this.layers){const pref=this.pref(layer.id),l=this.loaded.get(layer.id),box=node('div',{class:'annotation-file','data-layer':layer.id}),header=node('div',{class:'annotation-file-row'});
@@ -143,7 +153,7 @@ const annotations={layers:[],loaded:new Map(),preferences:{},selected:null,editi
   },
   setup(){
     this.vertexEditor=$('vertexEditor');
-    $('showAllAnnotations').onclick=()=>this.all(true);$('hideAllAnnotations').onclick=()=>this.all(false);
+    $('toggleAllAnnotations').onclick=()=>this.toggleAll();$('copyTissueMask').onclick=()=>this.copyTissue();
     $('fileSave').onclick=()=>this.save($('annotationTarget').value);$('fileUndo').onclick=()=>this.undo($('annotationTarget').value);$('fileRedo').onclick=()=>this.undo($('annotationTarget').value,true);$('vertexDone').onclick=()=>this.commitGeometry();
     $('annotationTarget').onchange=async()=>{if(this.editing)this.editing=null;setMode('pan');const id=$('annotationTarget').value;if(id!=='corrections'&&!this.loaded.has(id))try{await this.read(id,S.slideController?.signal);}catch(e){toast(e.message,true);}this.render();};$('regenerateAnnotations').onclick=()=>this.regenerate();
     $('importAnnotation').onclick=()=>{if(this.busy()){toast('Save your file draft before importing.');return;}

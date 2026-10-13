@@ -344,7 +344,7 @@ function openSlideImage(detail,signal) {
 }
 async function loadSlide(id,preserve=false,view=null) {
   if(annotations.busy()){toast('Save or undo the annotation file draft before changing slides.',true);return;}
-  annotations.sequence++;S.tissueRevision='';S.fieldInfo=null;S.transferredField=null;S.mainGuide?.close();S.mainGuide=null;S.fallbackField=null;
+  annotations.sequence++;S.tissueRevision='';S.fieldInfo=null;S.transferredField=null;S.fallbackField=null;
   if(S.datasetBusy){toast("Wait for the cohort update to finish.");return;}
   if(S.saving){toast("Wait for the current correction to save.");return;}
   if(S.pendingPolygon){toast("Retry the unsaved region or press Escape before changing slides.",true);return;}
@@ -380,10 +380,9 @@ async function loadSlide(id,preserve=false,view=null) {
     const tissue=await tissueRequest;
     if(sequence!==S.loadSequence)return;
     S.tissueGeometry=tissue.value?.geometry||null;S.tissueRevision=tissue.value?.revision||'';S.tissueStatus=tissue.value?.status||'unavailable';
-    S.engine.tissue(S.tissueGeometry,S.tissueRevision);S.guideSlide=null;
+    S.engine.tissue(S.tissueGeometry,S.tissueRevision);
     configureGrid();initializeThreshold();await updateMasks();
     annotations.load(id,controller.signal).catch(error=>{if(error.name!=='AbortError'&&sequence===S.loadSequence)toast('Annotations: '+error.message,true);});
-    if($('aggregationMethod').value==='crf')await predictionGuide(controller.signal);
     if(sequence!==S.loadSequence)return;
     $("slideCohort").textContent=cohortName(detail.cohort).toUpperCase()+" · "+detail.original_split.toUpperCase();
     $("slideTitle").textContent=detail.name;
@@ -452,7 +451,7 @@ async function updateMasks() {
     if(result.fieldInfo?.score&&S.detail?.id===id)S.transferredField={key:result.fieldInfo.key,score:result.fieldInfo.score,covered:result.fieldInfo.covered};
     if(result.cancelled&&sequence===S.maskSequence&&S.detail?.id===id&&!S.engine.worker)return updateMasks();
     if(result.cancelled||sequence!==S.maskSequence||S.detail?.id!==id){result.raster?.close();return;}
-    if(!result.fieldInfo&&predictionOptions().view.startsWith('aggregate')){S.engine.close();S.maskKey=null;return updateMasks();}
+    if(!result.fieldInfo&&(predictionOptions().view.startsWith('aggregate')||predictionOptions().view==='raw-label')){S.engine.close();S.maskKey=null;return updateMasks();}
     S.fieldInfo=result.fieldInfo?{...(S.transferredField?.key===result.fieldInfo.key?S.transferredField:{}),...result.fieldInfo}:null;S.lastComputeMs=result.compute_ms;S.mask=result.mask;S.maskKey=key;S.detail.manual_tiles=result.manual;S.detail.excluded_tiles=result.excluded;
     S.raster?.close?.();S.raster=result.raster;S.histogramBins=result.bins;
     $("excludedCount").textContent=fmt(result.excluded);$("excludedVisible").textContent=fmt(result.excludedVisible)+" / "+fmt(result.excluded);
@@ -480,14 +479,12 @@ async function updateMasks() {
   $("keepManual").disabled=$("overlaySource").value==="prediction";
   S.maskKey=key;S.raster=null;S.fieldInfo=null;
   const options={...filters(),...gridPayload(),...predictionOptions()};
-  if(options.view.startsWith('aggregate')){
-    const fieldKey=JSON.stringify([S.detail.fingerprint,S.detail.prediction_id,S.detail.revision,S.tissueRevision,options.method,options.sigma,options.resolution,options.grid_mode,options.source_overlap]);
+  if(options.view.startsWith('aggregate')||options.view==='raw-label'){
+    const fieldKey=JSON.stringify([S.detail.fingerprint,S.detail.prediction_id,S.detail.revision,S.tissueRevision,'mean-score-medulla-priority-v1',options.resolution,options.grid_mode,options.source_overlap]);
     if(S.fallbackField?.key!==fieldKey)S.fallbackField={key:fieldKey,field:PredictionField.create(S.data,S.detail,options,mainTissueMask(options))};
     const field=S.fallbackField.field,canvas=document.createElement('canvas');canvas.width=field.width;canvas.height=field.height;
-    const ctx=canvas.getContext('2d');let guide=null;
-    if(options.method==='crf'&&S.mainGuide){ctx.drawImage(S.mainGuide,0,0,field.width,field.height);guide=ctx.getImageData(0,0,field.width,field.height).data;}
-    const labels=PredictionField.classify(field,S.liveThreshold,S.thresholdPreview&&options.method==='crf'?'mean':options.method,options,guide),result=PredictionField.pixels(field,labels,options);
-    ctx.putImageData(new ImageData(result.rgba,field.width,field.height),0,0);S.raster=canvas;S.fieldInfo={...field,area:result.area,labels:result.displayed,guide:!!guide};
+    const ctx=canvas.getContext('2d'),labels=PredictionField.classify(field,S.liveThreshold),result=PredictionField.pixels(field,labels,options);
+    ctx.putImageData(new ImageData(result.rgba,field.width,field.height),0,0);S.raster=canvas;S.fieldInfo={...field,area:result.area,labels:result.displayed};
   }
   updateFieldStatus();requestRender();drawHistogram();
 }
@@ -519,9 +516,9 @@ function renderOverlay() {
   const size=S.detail.tile_size_level0*scale;
   canvas.style.opacity=Number($("opacity").value)/100;
   if($("overlayEnabled").checked&&S.mask) {
-    const view=$('predictionView').value,aggregate=view.startsWith('aggregate'),heatmapOptions=predictionOptions();
+    const view=$('predictionView').value,aggregate=view.startsWith('aggregate'),fieldView=aggregate||view==='raw-label',heatmapOptions=predictionOptions();
     const ids=candidates(-p0.x/scale,-p0.y/scale,(rect.width-p0.x)/scale,(rect.height-p0.y)/scale);
-    if(aggregate&&S.raster){ctx.imageSmoothingEnabled=false;const f=S.fieldInfo;ctx.drawImage(S.raster,p0.x,p0.y,(f?.width*f?.step||S.detail.width)*scale,(f?.height*f?.step||S.detail.height)*scale);}
+    if(fieldView&&S.raster){ctx.imageSmoothingEnabled=false;const f=S.fieldInfo;if(!aggregate)ctx.globalAlpha=.48;ctx.drawImage(S.raster,p0.x,p0.y,(f?.width*f?.step||S.detail.width)*scale,(f?.height*f?.step||S.detail.height)*scale);ctx.globalAlpha=1;}
     ctx.save();
     if(S.tissueGeometry&&(!aggregate||$('tileBoundaries').checked)){ctx.beginPath();const polygons=S.tissueGeometry.type==='Polygon'?[S.tissueGeometry.coordinates]:S.tissueGeometry.type==='MultiPolygon'?S.tissueGeometry.coordinates:[];for(const rings of polygons)for(const ring of rings){ring.forEach((p,i)=>i?ctx.lineTo(p0.x+p[0]*scale,p0.y+p[1]*scale):ctx.moveTo(p0.x+p[0]*scale,p0.y+p[1]*scale));ctx.closePath();}ctx.clip('evenodd');}
     if(!aggregate||$('tileBoundaries').checked)for(const index of ids) {
@@ -912,25 +909,22 @@ function inspectHover(event) {
   else text+=' · ≥ '+S.liveThreshold.toFixed(2)+' → medulla';$('hoverInfo').textContent=text;
 }
 function predictionOptions(){
-  const ids=['predictionView','aggregationMethod','gaussianSigma','rasterResolution','crfStrength','crfRadius','crfIterations','heatmapPalette','heatmapLow','heatmapMid','heatmapHigh'];
-  return {heatmap_palette:$('heatmapPalette').value,heatmap_low:$('heatmapLow').value,heatmap_mid:$('heatmapMid').value,heatmap_high:$('heatmapHigh').value,view:$('predictionView').value,method:$('aggregationMethod').value,sigma:Number($('gaussianSigma').value),resolution:Number($('rasterResolution').value),strength:Number($('crfStrength').value),radius:Number($('crfRadius').value),iterations:Number($('crfIterations').value),classification_threshold:S.liveThreshold??S.detail?.prediction_threshold??0,boundaries:$('tileBoundaries').checked,controls:Object.fromEntries(ids.map(id=>[id,$(id).value]))};
+  const ids=['predictionView','rasterResolution','heatmapPalette','heatmapLow','heatmapMid','heatmapHigh'];
+  return {heatmap_palette:$('heatmapPalette').value,heatmap_low:$('heatmapLow').value,heatmap_mid:$('heatmapMid').value,heatmap_high:$('heatmapHigh').value,view:$('predictionView').value,overlap_rule:'medulla-priority-v1',resolution:Number($('rasterResolution').value),classification_threshold:S.liveThreshold??S.detail?.prediction_threshold??0,boundaries:$('tileBoundaries').checked,controls:Object.fromEntries(ids.map(id=>[id,$(id).value]))};
 }
 function initializeThreshold(){S.liveThreshold=S.detail.prediction_threshold;S.thresholdPreview=false;
   const [lo,hi]=S.detail.score_range;for(const id of ['liveThreshold','liveThresholdNumber']){$(id).min=Math.min(lo,S.liveThreshold)-.5;$(id).max=Math.max(hi,S.liveThreshold)+.5;$(id).value=S.liveThreshold;}}
-let thresholdFrame=false,refineTimer;
+let thresholdFrame=false;
 function liveThreshold(value,preview=true){if(!Number.isFinite(value))return;S.liveThreshold=value;S.thresholdPreview=preview;
-  if(preview&&$('aggregationMethod').value==='crf')$('thresholdStatus').textContent='Preview only · ≥ threshold: medulla · refinement pending';
   $('liveThreshold').value=value;$('liveThresholdNumber').value=value;
   if(!thresholdFrame){thresholdFrame=true;requestAnimationFrame(()=>{thresholdFrame=false;updateMasks().catch(e=>toast(e.message,true));});}
-  clearTimeout(refineTimer);if(preview&&$('aggregationMethod').value==='crf')refineTimer=setTimeout(()=>{S.thresholdPreview=false;updateMasks().catch(e=>toast(e.message,true));},220);
 }
 function updateFieldStatus(){const options=predictionOptions(),f=S.fieldInfo;
   $('heatmapLegend').querySelector('i').style.background='linear-gradient(to right,'+PredictionField.palette(options).map(rgb=>'rgb('+rgb.join(',')+')').join(',')+')';
   $('heatmapLegend').setAttribute('aria-label','Decision scores from low to high · '+options.heatmap_palette+' palette');
   $('heatmapLegend').hidden=!options.view.includes('score');$('heatmapMin').textContent=S.detail.score_range[0].toFixed(2);$('heatmapMax').textContent=S.detail.score_range[1].toFixed(2)+' · decision score';
-  $('crfControls').hidden=options.method!=='crf';
-  $('thresholdStatus').textContent='Preview only · ≥ threshold: medulla'+(options.method==='crf'&&S.thresholdPreview?' · refinement pending':'');
-  $('fieldStatus').textContent=f?f.width+' × '+f.height+' · '+f.step+' px / cell · transparent: uncovered'+(!S.tissueRevision?' · tissue unavailable':'')+(options.method==='crf'?(f.guide?' · image-guided':' · spatial only; image pending'):''):'Tile counts · overlaps inspectable';
+  $('thresholdStatus').textContent='Preview only · ≥ threshold: medulla · medulla wins tile overlaps';
+  $('fieldStatus').textContent=f?f.width+' × '+f.height+' · '+f.step+' px / cell · transparent: uncovered'+(!S.tissueRevision?' · tissue unavailable':''):'Tile counts · overlaps inspectable';
   if(f){$('cortexCount').textContent='≈ '+(f.area[0]/1e6).toFixed(2)+' M px²';$('medullaCount').textContent='≈ '+(f.area[1]/1e6).toFixed(2)+' M px²';}
   else {for(const id of ['cortexCount','medullaCount'])$(id).textContent+=' tiles';}
 }
@@ -938,15 +932,10 @@ async function predictionTissue(signal){const slide=S.detail?.id,sequence=S.load
   try{const result=await api('/api/slides/'+slide+'/prediction-tissue',{signal});if(sequence!==S.loadSequence||slide!==S.detail?.id)return;S.tissueGeometry=result.geometry||null;S.tissueRevision=result.revision||'';S.engine.tissue(S.tissueGeometry,S.tissueRevision);S.maskKey=null;await updateMasks();}
   catch(e){if(e.name!=='AbortError')toast('Tissue clipping: '+e.message,true);}
 }
-async function predictionGuide(signal){const slide=S.detail?.id,sequence=S.loadSequence;if(!slide)return;
-  if(S.guideSlide===slide)return;
-  try{const response=await api('/api/wsi/'+slide+'/thumbnail',{signal}),image=await createImageBitmap(await response.blob());if(sequence!==S.loadSequence||slide!==S.detail?.id){image.close();return;}S.guideSlide=slide;S.mainGuide?.close();S.mainGuide=image;if(S.engine.worker)S.engine.guide(await createImageBitmap(image));if($('aggregationMethod').value==='crf'){S.maskKey=null;await updateMasks();}}
-  catch(e){if(e.name!=='AbortError')console.warn('CRF image guide unavailable',e.message);}
-}
 function mainTissueMask(options){if(!S.tissueGeometry)return null;const step=Math.max(options.resolution,Math.ceil(Math.max(S.detail.width,S.detail.height)/1536)),canvas=document.createElement('canvas');canvas.width=Math.ceil(S.detail.width/step);canvas.height=Math.ceil(S.detail.height/step);return PredictionField.tissueMask(S.tissueGeometry,canvas.width,canvas.height,step,canvas);}
 function exportPredictionView(metadata=false){if(!S.raster||!S.fieldInfo){toast('Choose an aggregated view first.');return;}const f=S.fieldInfo,stamp=new Date().toISOString().replaceAll(':','-'),name='histoloop-preview-'+stamp;
   const download=(blob,extension)=>{const url=URL.createObjectURL(blob),link=node('a',{href:url,download:name+extension});link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
-  if(metadata)download(new Blob([JSON.stringify({version:1,created_at:new Date().toISOString(),slide_id:S.detail.id,prediction_id:S.detail.prediction_id,model_id:S.detail.model_id,fingerprint:S.detail.fingerprint,tissue_revision:S.tissueRevision||null,algorithm:'bounded-field-v1',...predictionOptions(),output:{width:f.width,height:f.height,step_level0:f.step,origin_level0:[0,0]},score_orientation:'score >= threshold means medulla',uncalibrated:true,uncovered:'transparent',refinement_pending:!!S.thresholdPreview},null,2)],{type:'application/json'}),'.json');
+  if(metadata)download(new Blob([JSON.stringify({version:1,created_at:new Date().toISOString(),slide_id:S.detail.id,prediction_id:S.detail.prediction_id,model_id:S.detail.model_id,fingerprint:S.detail.fingerprint,tissue_revision:S.tissueRevision||null,algorithm:'bounded-mean-score-medulla-priority-v1',...predictionOptions(),output:{width:f.width,height:f.height,step_level0:f.step,origin_level0:[0,0]},score_orientation:'score >= threshold means medulla',overlap_rule:'Any covering medulla tile makes the displayed cell medulla; mean score is retained for the heatmap. This is a display rule, not confidence.',uncalibrated:true,uncovered:'transparent'},null,2)],{type:'application/json'}),'.json');
   else {const canvas=document.createElement('canvas');canvas.width=f.width;canvas.height=f.height;canvas.getContext('2d').drawImage(S.raster,0,0);canvas.toBlob(blob=>download(blob,'.png'));}
 }
 function wireEvents() {
@@ -964,7 +953,7 @@ function wireEvents() {
   $('liveThresholdNumber').oninput=()=>liveThreshold(Number($('liveThresholdNumber').value),true);
   $('liveThreshold').onchange=()=>liveThreshold(Number($('liveThreshold').value),false);
   $('thresholdReset').onclick=()=>liveThreshold(S.detail.prediction_threshold,false);
-  for(const id of ['predictionView','aggregationMethod','gaussianSigma','rasterResolution','crfStrength','crfRadius','crfIterations'])$(id).onchange=()=>{S.thresholdPreview=false;updateMasks().catch(e=>toast(e.message,true));if($('aggregationMethod').value==='crf')predictionGuide(S.slideController?.signal);schedulePreferences();};
+  for(const id of ['predictionView','rasterResolution'])$(id).onchange=()=>{S.thresholdPreview=false;updateMasks().catch(e=>toast(e.message,true));schedulePreferences();};
   $('exportMap').onclick=()=>exportPredictionView();$('exportMapMetadata').onclick=()=>exportPredictionView(true);
   $('tileBoundaries').onchange=()=>{requestRender();schedulePreferences();};
   for(const id of ["gridMode","sourceOverlap"])$(id).onchange=()=>{if(S.saving||S.pendingPolygon||S.draft.length){$("gridMode").value=S.activeGrid.grid_mode;$("sourceOverlap").value=S.activeGrid.source_overlap;toast("Save or cancel the region before changing grids.");return;}configureGrid();updateMasks().catch(error=>toast(error.message,true));schedulePreferences();};

@@ -200,6 +200,13 @@ def create_app(config: Config | None = None, token: str | None = None) -> FastAP
         actor(payload)
         return annotation_files.regenerate(slide_id, payload.get('tissue_id'))
 
+    @app.post('/api/slides/{slide_id}/annotation-tissue-copy')
+    def annotation_tissue_copy(slide_id: str, payload: dict, background: BackgroundTasks):
+        reviewer = actor(payload)
+        result = annotation_files.copy_tissue_to_working(slide_id, payload.get('tissue_id'), reviewer)
+        background.add_task(annotation_files.regenerate, slide_id, result['tissue_id'])
+        return result
+
     @app.post('/api/annotation-preview')
     def annotation_preview(payload: dict):
         actor(payload)

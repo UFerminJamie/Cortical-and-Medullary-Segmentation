@@ -29,10 +29,15 @@ def test_annotation_files_panels_and_prediction_workflow(setup):
             page.evaluate('(id)=>loadSlide(id)',sid)
             page.wait_for_function('(id)=>S.detail?.id===id&&!S.loading&&annotations.layers.length',arg=sid)
             assert page.evaluate('annotations.loaded.size') == 0
-            page.locator('#showAllAnnotations').click()
+            page.locator('#toggleAllAnnotations').click()
+            assert page.locator('#toggleAllAnnotations').get_attribute('aria-pressed')=='true'
             page.wait_for_function('annotations.loaded.has("cortical_gt.json")')
             assert page.evaluate('annotations.layers.filter(l=>l.present).length')==5
             page.wait_for_function('annotations.layers.filter(l=>l.present).every(l=>annotations.loaded.has(l.id))')
+            page.locator('#toggleAllAnnotations').click()
+            assert page.locator('#toggleAllAnnotations').get_attribute('aria-pressed')=='false'
+            page.locator('#toggleAllAnnotations').click()
+            page.locator('[data-layer="cortical_gt.json"] .layer-expand').click()
             assert page.locator('[data-layer="cortical_gt.json"] .region-row').count()==1
             before=files.layer_path(sid,'cortical_gt.json').read_bytes()
             page.locator('[data-layer="cortical_gt.json"] input[type=color]').fill('#00ff66')
@@ -76,19 +81,19 @@ def test_annotation_files_panels_and_prediction_workflow(setup):
             assert len(files.read(sid,'cortical_gt.json')['regions'])==2
             page.locator('#regenerateAnnotations').click();page.wait_for_function('annotations.generation.status==="current"')
             page.locator('[aria-controls=panel-overlap]').click()
-            for method in ['majority','mean','gaussian','crf']:
-                page.locator('#aggregationMethod').select_option(method);page.wait_for_timeout(200)
+            assert page.locator('#aggregationMethod').count()==0
             page.evaluate("async()=>{$('predictionView').value='raw-label';await updateMasks();$('predictionView').value='aggregate-score';const first=updateMasks();S.liveThreshold+=.01;await updateMasks();await first;}")
             assert page.evaluate('S.fieldInfo.score.length===S.fieldInfo.width*S.fieldInfo.height')
             page.locator('#liveThresholdNumber').fill('5');page.locator('#liveThresholdNumber').dispatch_event('input')
             page.wait_for_function('S.fieldInfo&&Array.from(S.fieldInfo.labels).every(x=>x!==1)')
             assert files.read(sid,'cortical_gt.json')['document']['metadata']['retain']
             assert client.get(f'/api/slides/{sid}').json()['manual_tiles']==0
-            # The main-thread fallback uses identical refinement and displayed labels.
-            assert page.evaluate("async()=>{S.thresholdPreview=false;S.liveThreshold=.1;S.maskKey=null;await predictionGuide();await updateMasks();const labels=Array.from(S.fieldInfo.labels);S.engine.close();S.maskKey=null;await updateMasks();return JSON.stringify(labels)===JSON.stringify(Array.from(S.fieldInfo.labels));}")
-            page.evaluate("async()=>{S.engine.startWorker();await S.engine.initialize(S.data,S.detail);S.engine.tissue(S.tissueGeometry,S.tissueRevision);if(S.mainGuide)S.engine.guide(await createImageBitmap(S.mainGuide));S.maskKey=null;await updateMasks();}")
+            # Worker and main-thread fallback use the same medulla-priority overlap labels.
+            parity=page.evaluate("async()=>{S.thresholdPreview=false;S.liveThreshold=.1;S.maskKey=null;await updateMasks();const worker=Array.from(S.fieldInfo.labels);S.engine.close();S.maskKey=null;await updateMasks();const fallback=Array.from(S.fieldInfo.labels),mismatch=[];for(let i=0;i<worker.length&&mismatch.length<8;i++)if(worker[i]!==fallback[i])mismatch.push([i,worker[i],fallback[i]]);return {equal:JSON.stringify(worker)===JSON.stringify(fallback),mismatch};}")
+            assert parity['equal'],parity
+            page.evaluate("async()=>{S.engine.startWorker();await S.engine.initialize(S.data,S.detail);S.engine.tissue(S.tissueGeometry,S.tissueRevision);S.maskKey=null;await updateMasks();}")
             # Generation cancellation must not publish a previous slide’s field.
-            page.evaluate("$('aggregationMethod').value='crf';updateMasks();loadSlide(S.slides.find(s=>s.id!==S.detail.id).id)")
+            page.evaluate("$('predictionView').value='raw-label';updateMasks();loadSlide(S.slides.find(s=>s.id!==S.detail.id).id)")
             page.wait_for_function('(old)=>S.detail.id!==old&&!S.loading',arg=sid)
             page.wait_for_function('annotations.layers.length&&annotations.loaded.size===0')
             page.locator('[data-layer="cortical_gt.json"] button:text("Create")').click()

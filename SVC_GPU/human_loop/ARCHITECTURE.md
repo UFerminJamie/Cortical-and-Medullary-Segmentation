@@ -23,21 +23,21 @@ expansion and paginate at 30 regions. Existing `panels.js` owns disclosures,
 sidebar widths/visibility, drawers, and Focus viewer. The original responsive grid
 and OSD resize lifecycle remain in place.
 
-`prediction-field.js` is shared by the existing worker and fallback. It aggregates
-physical level-zero footprints into bounded typed-array fields. The default mean
-class raster is used at both overview and zoom; raw inspection uses viewport
-outlines/transparent scores. Majority ties use the same thresholded mean rule.
-Gaussian weighting adapts scalar tile evidence. A bounded local Potts CRF uses
-uncalibrated score evidence and a stable RGB thumbnail guide, with component/gap
-constraints and adjustable regularization. Threshold changes reuse score/coverage
-fields and never change baseline predictions or fixed human labels. Worker
-generations discard stale results; one current and one coalesced next filter keep
-queueing bounded. Source buffers are retransferred only when the field identity
-changes. A displayed-field PNG and JSON parameter export are separate derived
-artifacts, not registered inference/training inputs.
+`prediction-field.js` is shared by the existing worker and fallback. It keeps a
+bounded mean decision-score field over physical level-zero tile footprints and
+uses an order-independent display rule: a covered cell is medulla if any tile
+covering it meets the selected run threshold; otherwise it is cortex. The same
+raster drives overview, zoom and raw-label overlap inspection. Heatmap scores
+remain the mean SVM decision score, not calibrated probabilities. Threshold
+changes reuse coverage/score fields and do not change baseline predictions or
+fixed human labels. Worker generations discard stale results; one current and
+one coalesced next filter keep queueing bounded. A displayed-field PNG and JSON
+parameter export are separate derived artifacts, not registered inference or
+training inputs. Native contour masks can be copied into editable `Tissue_qc.json`
+without changing the configured source contour.
 
 See [working annotation design](docs/annotation-workspace.md) for schemas,
-atomicity/recovery contracts, formulas, deployment binds, and resolution/CRF limits.
+atomicity/recovery contracts, overlap rules, deployment binds and raster limits.
 See [workspace validation](docs/workspace-validation.md) for real measurements and
 local-only screenshot status.
 
@@ -75,7 +75,7 @@ The interface uses HTML, CSS Grid/Flexbox, vanilla JavaScript, and vendored **Op
 | `static/app.js` | Shared state `S`, dataset/slide selection, review tools, HTTP requests |
 | `static/navigation-cache.js` | Bounded slide-view cache, ETags, cancellation, adjacent-view prefetch |
 | `static/tile-engine.js`, `tile-worker.js` | Masks, histograms, spatial indexing, OffscreenCanvas overview rasters |
-| `static/prediction-field.js` | Shared bounded aggregation, score colors, CRF and tissue component masks |
+| `static/prediction-field.js` | Shared bounded mean-score field, medulla-priority labels, score colors and tissue masks |
 | `static/annotation-manager.js` | Independent file layers, drafts, vertex editing, saves and versions |
 | `static/panels.js` | Resize/collapse, mobile drawers, keyboard access |
 
@@ -97,8 +97,8 @@ Entry point: `python -m SVC_GPU.human_loop.server`; tests call `create_app(Confi
 | `POST /api/slides/{id}/corrections`, `/undo`, `/review` | Edits, undo, completion |
 | `GET /api/slides/{id}/history` | Bounded history with cursor pagination |
 | `GET /api/slides/{id}/annotations`, `GET/PUT /annotations/{layer}` | Missing/present layer discovery, native documents, revision-checked file editing |
-| `POST /api/slides/{id}/annotation-generation`, `GET/POST /annotation-versions/{layer}` | Exact derived geometry and recoverable saved versions |
-| `GET /api/slides/{id}/prediction-tissue`, `/api/wsi/{id}/thumbnail` | Selected vector tissue mask and bounded CRF image guide |
+| `POST /api/slides/{id}/annotation-generation`, `POST /annotation-tissue-copy`, `GET/POST /annotation-versions/{layer}` | Exact derived geometry, editable tissue copies and recoverable saved versions |
+| `GET /api/slides/{id}/prediction-tissue` | Selected vector tissue mask |
 | `POST /api/bulk-labels/plan`, `/api/bulk-labels` | Revision-frozen bulk preview and writes |
 | `GET/POST /api/jobs`, `GET /api/jobs/{id}/logs` | Optional model job lifecycle |
 | `GET /api/export`, `/api/performance` | Audit ZIP and request/cache metrics |

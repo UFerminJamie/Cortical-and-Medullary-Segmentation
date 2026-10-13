@@ -1,7 +1,7 @@
 "use strict";
 importScripts('/static/prediction-field.js?v=2');
 let data, detail, grid;
-let fieldCache=null,tissue=null,tissueRevision='',guide=null,lastSentField=null;
+let fieldCache=null,tissue=null,tissueRevision='',lastSentField=null;
 const color = label => label===-2?"#aab2b9":label===0?"#529cff":"#f18582";
 function labelAt(i, source, threshold=detail.prediction_threshold) {
   const human=data[i*5+4];
@@ -12,7 +12,7 @@ onmessage = event => {
   const message=event.data;
   if(message.type==="init") {
     data=new Float32Array(message.data);detail=message.detail;grid=new Map();
-    fieldCache=null;tissue=null;guide?.close();guide=null;tissueRevision='';lastSentField=null;
+    fieldCache=null;tissue=null;tissueRevision='';lastSentField=null;
     for(let i=0;i<detail.tiles;i++) {
       const key=Math.floor((data[i*5]+detail.tile_size_level0/2)/2048)+","+Math.floor((data[i*5+1]+detail.tile_size_level0/2)/2048);
       let bin=grid.get(key);if(!bin){bin=[];grid.set(key,bin);}bin.push(i);
@@ -21,7 +21,6 @@ onmessage = event => {
     return;
   }
   if(message.type==='tissue') {tissue=message.geometry;tissueRevision=message.revision||'';fieldCache=null;return;}
-  if(message.type==='guide') {guide?.close();guide=message.image;return;}
   if(message.type==="labels") {for(const i of message.ids)data[i*5+4]=message.label;fieldCache=null;return;}
   if(message.type!=="filter"||!data)return;
   const start=performance.now(),f=message.filters,mask=new Uint8Array(detail.tiles),totals=[0,0],visible=[0,0];
@@ -45,8 +44,8 @@ onmessage = event => {
     if(keep){mask[i]=1;if(label>=0)visible[label]++;else excludedVisible++;}
   }
   let raster=null,fieldInfo=null;
-  if(typeof OffscreenCanvas!=="undefined"&&f.view?.startsWith('aggregate')) {
-    const key=JSON.stringify([detail.fingerprint,detail.prediction_id,tissueRevision,f.method,f.sigma,f.resolution,f.grid_mode,f.source_overlap]);
+  if(typeof OffscreenCanvas!=="undefined"&&(f.view?.startsWith('aggregate')||f.view==='raw-label')) {
+    const key=JSON.stringify([detail.fingerprint,detail.prediction_id,tissueRevision,'mean-score-medulla-priority-v1',f.resolution,f.grid_mode,f.source_overlap]);
     if(fieldCache?.key!==key) {
       let tissueMask=null;
       if(tissue) {
@@ -56,13 +55,11 @@ onmessage = event => {
       fieldCache={key,field:PredictionField.create(data,detail,f,tissueMask)};
     }
     const field=fieldCache.field;
-    let image=null;
-    if(f.method==='crf'&&guide){const c=new OffscreenCanvas(field.width,field.height),ctx=c.getContext('2d');ctx.drawImage(guide,0,0,field.width,field.height);image=ctx.getImageData(0,0,field.width,field.height).data;}
-    const labels=PredictionField.classify(field,f.classification_threshold,f.preview&&f.method==='crf'?'mean':f.method,f,image);
+    const labels=PredictionField.classify(field,f.classification_threshold);
     const {rgba,area,displayed}=PredictionField.pixels(field,labels,f),canvas=new OffscreenCanvas(field.width,field.height);
     canvas.getContext('2d').putImageData(new ImageData(rgba,field.width,field.height),0,0);raster=canvas.transferToImageBitmap();
     const changed=lastSentField!==key;
-    fieldInfo={key,width:field.width,height:field.height,step:field.step,area,labels:displayed,guide:!!image};
+    fieldInfo={key,width:field.width,height:field.height,step:field.step,area,labels:displayed};
     if(changed){fieldInfo.score=field.score.slice();fieldInfo.covered=field.count.slice();lastSentField=key;}
   }
   const result={type:"filter",id:message.id,generation:message.generation,mask,totals,visible,manual,excluded,excludedVisible,bins,raster,

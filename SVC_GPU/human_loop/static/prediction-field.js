@@ -1,19 +1,18 @@
 /* Shared worker/fallback math. Bounded level-zero sampling; never a full WSI raster. */
 "use strict";
 const PredictionField = (() => {
-  const sigmoid=x=>1/(1+Math.exp(-Math.max(-30,Math.min(30,x))));
   function create(data, detail, options, tissue=null) {
     const step=Math.max(Number(options.resolution)||32,Math.ceil(Math.max(detail.width,detail.height)/1536));
     const width=Math.ceil(detail.width/step),height=Math.ceil(detail.height/step),length=width*height;
-    const sum=new Float64Array(length),weight=new Float64Array(length),count=new Uint32Array(length),
+    const sum=new Float64Array(length),weight=new Float64Array(length),count=new Uint32Array(length),maxScore=new Float32Array(length),
       human0=new Uint16Array(length),human1=new Uint16Array(length),excluded=new Uint16Array(length);
+    maxScore.fill(NaN);
     const ids=Array.from({length:detail.tiles},(_,i)=>i).sort((a,b)=>data[a*5]-data[b*5]||data[a*5+1]-data[b*5+1]||data[a*5+2]-data[b*5+2]);
-    const gaussian=options.method==='gaussian',sigma=Math.max(.05,Math.min(.75,options.sigma||.25))*detail.tile_size_level0;
-    const f={width,height,step,count,human0,human1,excluded,ids,data,detail,options,tissue};
+    const f={width,height,step,count,maxScore,human0,human1,excluded,ids,data,detail,options,tissue};
     for(const i of ids)visit(f,i,(p,x,y)=>{
-      const o=i*5,s=detail.tile_size_level0,
-        w=gaussian?Math.exp(-((x-data[o]-s/2)**2+(y-data[o+1]-s/2)**2)/(2*sigma*sigma)):1;
-      sum[p]+=w*data[o+2];weight[p]+=w;count[p]++;
+      const o=i*5;
+      sum[p]+=data[o+2];weight[p]++;count[p]++;
+      maxScore[p]=Number.isNaN(maxScore[p])?data[o+2]:Math.max(maxScore[p],data[o+2]);
       if(data[o+4]===0)human0[p]++;else if(data[o+4]===1)human1[p]++;else if(data[o+4]===-2)excluded[p]++;
     });
     const score=new Float32Array(length);score.fill(NaN);
@@ -33,40 +32,12 @@ const PredictionField = (() => {
       const p=y*width+x;if(f.tissue&&!f.tissue[p])continue;callback(p,(x+.5)*step,(y+.5)*step);
     }
   }
-  function classify(f,threshold,method,params={},guide=null) {
+  function classify(f,threshold) {
     const labels=new Int8Array(f.count.length);labels.fill(-1);
-    let votes=null;
-    if(method==='majority') {
-      votes=new Uint32Array(labels.length);
-      for(const i of f.ids)if(f.data[i*5+2]>=threshold)visit(f,i,p=>votes[p]++);
-    }
-    for(const p of f.active)labels[p]=votes?
-      (votes[p]*2===f.count[p]?Number(f.score[p]>=threshold):Number(votes[p]*2>f.count[p])):Number(f.score[p]>=threshold);
-    if(method==='crf')refine(f,threshold,labels,params,guide);
+    // maxScore is the commutative maximum across covering physical tile footprints.
+    // Any tile above threshold therefore wins without a per-threshold tile traversal.
+    for(const p of f.active)labels[p]=Number(f.maxScore[p]>=threshold);
     return labels;
-  }
-  function refine(f,threshold,labels,params,guide) {
-    const strength=Math.max(0,Math.min(5,Number(params.strength)||0)),radius=Math.max(1,Math.min(3,Number(params.radius)||1)),
-      iterations=Math.max(1,Math.min(12,Number(params.iterations)||5)),scale=Math.max(.1,(f.detail.score_range[1]-f.detail.score_range[0])/6);
-    let q=new Float32Array(labels.length),next=new Float32Array(labels.length);
-    for(const p of f.active)q[p]=sigmoid((f.score[p]-threshold)/scale);
-    const directions=[[1,0],[-1,0],[0,1],[0,-1]];
-    for(let iter=0;iter<iterations;iter++) {
-      for(const p of f.active) {
-        const x=p%f.width,y=Math.floor(p/f.width);let sum=0,weights=0;
-        for(const [dx,dy] of directions)for(let k=1;k<=radius;k++) {
-          const xx=x+dx*k,yy=y+dy*k;if(xx<0||xx>=f.width||yy<0||yy>=f.height)break;
-          const n=yy*f.width+xx;if(!f.count[n])break; // No edges across uncovered/tissue gaps.
-          if(f.tissue&&f.tissue[p]!==f.tissue[n])break; // Separate vector tissue components stay separate even at coarse resolutions.
-          let w=Math.exp(-k*k/(2*radius*radius));
-          if(guide){let color=0;for(let c=0;c<3;c++)color+=(guide[p*4+c]-guide[n*4+c])**2;w*=Math.exp(-color/(2*35*35));}
-          sum+=w*(2*q[n]-1);weights+=w;
-        }
-        next[p]=sigmoid((f.score[p]-threshold)/scale+strength*(weights?sum/weights:0));
-      }
-      [q,next]=[next,q];
-    }
-    for(const p of f.active)labels[p]=Number(q[p]>=.5);
   }
   // Palette changes affect display only, never scores or classification.
   function palette(options={}) {

@@ -14,10 +14,10 @@ HistoLoop is an interactive web application for visualizing whole-slide histopat
 - Optional native RAPIDS GPU prediction and retraining from frozen review snapshots.
 - Persistent per-sample JSON annotation files, independent layers, vertex editing,
   revision checks, recoverable backups, and exact tissue-clipped derived classes.
-- Order-independent mean/vote/Gaussian/CRF overlap display, continuous margin
-  heatmaps, live preview threshold, and collapsible panels with Focus viewer.
+- Order-independent mean score heatmaps and medulla-priority overlap labels,
+  live preview threshold, 0/50/75% tile-overlap views, and collapsible panels.
 
-Migration, schemas, file editing, prediction methods, container annotation binds,
+Migration, schemas, file editing, overlap labels, container annotation binds,
 and concrete limitations are documented in [Working annotations and prediction review](docs/annotation-workspace.md).
 Executed tests and real-slide timings: [Workspace validation](docs/workspace-validation.md).
 

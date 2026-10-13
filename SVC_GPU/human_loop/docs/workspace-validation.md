@@ -70,23 +70,20 @@ and working annotation copies. Before/after SHA-256 checks found no change to
 source predictions or original GT. No browser errors occurred.
 
 The original filter path measured p50 **40.4 ms**, p95 **58.2 ms** over 12 updates
-on a 11,986-tile slide (111,607 × 41,957 pixels). That baseline changed score
-visibility, whereas this feature reclassifies an aggregate field; they are not
-equivalent workloads. After baseline measurement, the interaction targets were
-p95 below 200 ms for cached simple aggregation and 500 ms for bounded CRF, with
-an inexpensive mean preview during dragging. Mean/Gaussian and CRF met those
-targets on both measured slides. Majority voting on slide 1 missed the simple
-aggregation target (226.5 ms p95); its tile votes must be recomputed per threshold.
+on a 11,986-tile slide (111,607 × 41,957 pixels). Those timings predate the fixed
+medulla-priority overlap rule and are not current performance results. The new
+rule uses a cached maximum covering-tile score per cell when the threshold
+changes, while retaining the mean score field. It has not yet been
+measured on the two production slides below, so the earlier method comparisons
+are retained only as historical context and are not used to claim a target met.
 These are interaction timings, not a 60 FPS claim.
 
-Feature timings below are p50 / p95 milliseconds from a programmatic threshold
-update to accepted worker output and the next animation frame, 20 updates per
-method. They include browser scheduling; they exclude first slide loading,
-initial field creation and the slider's CRF debounce interval. The median is p50;
-p95 uses sorted index `floor(0.95*(n-1))`. Actual slider dragging was separately
-exercised in the browser workflow test.
+The following method comparison was captured before removing the method selector.
+It records the former implementations and is not a benchmark of the active
+medulla-priority rule. The median is p50; p95 used sorted index
+`floor(0.95*(n-1))`.
 
-| Method | Real slide 1: 14,773 tiles | Real slide 2: 91,174 tiles |
+| Historical method (not selectable now) | Real slide 1: 14,773 tiles | Real slide 2: 91,174 tiles |
 |---|---:|---:|
 | Mean score | 49.2 / 83.2 | 66.6 / 100.8 |
 | Majority vote | 100.7 / 226.5 | 51.1 / 107.3 |

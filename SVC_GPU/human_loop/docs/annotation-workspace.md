@@ -141,6 +141,12 @@ marks derivation unavailable; prior outputs are stale, not current results.
 
 Exact-name contour candidates and imported `Tissue_qc.json` are offered for
 selection. Multiple masks or ambiguous sample basenames require an explicit choice.
+When a configured contour is selected and no working `Tissue_qc.json` exists,
+**Copy selected mask to editable Tissue_qc.json** copies that schema-preserving
+document into the sample's working folder. The original contour remains unchanged;
+the selected source name and checksum are recorded in the hidden tissue-selection
+record. The copy then appears as the editable tissue layer and can be drawn into
+or vertex-edited like other annotation files.
 Source saves schedule background regeneration; **Regenerate** also runs it
 manually. Dirty/pending derived rows are marked stale. The manifest records both
 source hashes, tissue identity/hash, algorithm, generation ID and time. Both
@@ -150,31 +156,25 @@ the files outside HistoLoop must also check `.generation.json` is current.
 
 ## Prediction display and threshold
 
-The default is an **aggregated class map with mean score**, replacing the
-order-dependent rectangle overpainting used in both previous overlay paths.
-Overview and zoom display the same cached raster with nearest-neighbor sampling.
-Raw label inspection uses outlines; raw score inspection uses transparent fills
-with inspectable contributions. Optional tile boundaries and hover IDs/scores
-preserve access to the original observations. Nothing paints medulla last as an
-overlap fix.
+The category renderer has one fixed overlap rule. It thresholds each physical
+tile score against the selected run threshold, then marks a covered raster cell
+medulla if **any tile covering that cell is medulla**; otherwise the cell is
+cortex. This rule is order-independent and applies to the same cached raster at
+overview and zoom. Raw tile labels remain separately inspectable with tile
+outlines and hover IDs/scores; the raw-label view overlays the shared class raster
+to make medulla-winning overlap regions explicit. The optional 0%, 50% and 75%
+tile-overlap grid views select matching source tile footprints; “All source tiles”
+shows the original geometry. A source-overlap profile remains available when
+automatic profile detection is ambiguous.
 
-The four methods are:
-
-| Method | Rule at a covered raster cell |
-|---|---|
-| Majority vote | Threshold every covering tile. More votes wins; ties compare mean score with the same threshold. |
-| Mean score | Average covering decision scores, then threshold. |
-| Gaussian score | `sum(w*score)/sum(w)`, with Gaussian weights centered on physical tile footprints; sigma is 0.05–0.75 tile widths, default 0.25. |
-| Spatial CRF | Bounded local binary Potts mean-field refinement of the mean field, using score-based unary evidence and spatial/RGB similarity. Strength 0–5, radius 1–3 cells, iterations 1–12. |
-
-The CRF uses uncalibrated unary evidence `(mean_score-threshold)/scale`, with
-`scale=max(0.1, score_span/6)`, mapped through a sigmoid for its internal update.
-That mapping is **not calibrated confidence**. The graph uses axial neighbors;
-it is a practical local adaptation, not the fully connected algorithm in the
-reference paper. Thumbnail RGB similarity is optional while its bounded image
-guide loads. Color edges are not anatomical truth. CRF never fills uncovered cells
-or intentionally links separate vector tissue components/background gaps. No
-morphological cleanup removes small components.
+The continuous score heatmap still displays the **mean decision score** across
+covering tiles. It is independent of the categorical overlap rule. The tile
+overlap grid and score raster are bounded to the configured maximum raster size;
+transparent cells are uncovered. This display policy gives medulla precedence
+where labels overlap without painting medulla rectangles last or changing any
+saved prediction/correction. Score scaling is fixed to the selected run's score
+range; SVM margins are not probabilities. Tile overlaps are correlated
+observations, not independent confidence measurements.
 
 The Cividis-like blue/yellow score ramp is fixed to the selected run's full score
 range. It does not rescale during panning or change classification. SVM margins
@@ -184,34 +184,28 @@ independent-sample statistical confidence. Ground truth remains independent.
 The live slider/numeric input classifies **score ≥ threshold as medulla**, as
 confirmed in `gpu_model.predict_gpu` and the host model's encoded class mapping
 (`0=cortical`, `1=medullary`). **Reset run threshold** restores the selected saved
-run's original threshold. Majority thresholds tiles before voting; mean/Gaussian
-threshold the aggregate; CRF updates its evidence. CRF dragging immediately uses
-the mean preview, then debounces refinement by 220 ms; pending/stale responses are
-marked/discarded. Existing human labels stay fixed. Score visibility filters remain
-separate. Tile-correction eligibility can use the preview threshold while its
-audit record retains original prediction labels and both thresholds.
+run's original threshold. Threshold changes reclassify tile footprints and update
+the medulla-priority overlap raster while preserving mean scores for the heatmap.
+Existing human labels stay fixed. Score visibility filters remain separate.
+Tile-correction eligibility can use the preview threshold while its audit record
+retains original prediction labels and both thresholds.
 
 Aggregate counts are sampled area in level-zero pixels squared (`≈ M px²`);
 raw counts and histograms describe tiles. Uncovered/outside-mask cells are
-transparent. Score heatmaps retain aggregate SVM margins even when CRF refines the
-class map; they do not display a fabricated calibrated probability field.
+transparent. The score heatmap is the mean SVM decision score and does not display
+a fabricated calibrated probability field.
 
 Threshold changes are preview-only. No inference runs or prediction fetches occur
 per slider movement. Baseline CSVs, GT and tile correction events remain unchanged.
 Export overlay PNG and parameters JSON use new timestamped filenames with
-prediction identity, fingerprint, tissue revision, method/parameters, threshold,
-resolution and pending-refinement flag. These display exports are not registered
+prediction identity, fingerprint, tissue revision, overlap rule, threshold and
+resolution. These display exports are not registered
 as training/prediction runs. There is no "replace baseline" or save-preview-run
 action.
 
-Primary references: [MONAI overlap blending](https://monai.readthedocs.io/en/stable/inferers.html),
-[scikit-learn calibration](https://scikit-learn.org/stable/modules/calibration.html),
-[Krähenbühl & Koltun CRF inference](https://www.philkr.net/2011/kraehenbuehl2011efficient/).
-No MONAI/dense-CRF framework is imported for these scalar tile fields.
-
 ## Workspace and deployment
 
-Sample filters, annotations, prediction filters, overlap/refinement, histogram,
+Sample filters, annotations, prediction filters, prediction display, histogram,
 history and compute are independent accessible disclosures in `panels.js`.
 Annotations expand initially; advanced controls start collapsed. Panels do not
 change layer eye states. Sidebars reclaim their width when collapsed; top restore
@@ -221,7 +215,8 @@ visibility, widths, file display settings and method controls, with viewport
 clamping. Narrow screens use independent drawers. Collapsed lists/charts defer
 rendering and update on reopen. File tools, navigation, save indicators and the
 live threshold remain reachable in Focus mode. Disabled compute has no large empty
-panel.
+panel. One annotation control toggles visibility for every discovered layer without
+changing a layer's expansion state, color, opacity or geometry.
 
 | Data | Native location | Container bind |
 |---|---|---|
@@ -259,17 +254,18 @@ The prediction field is bounded to at most 1,536 cells on its longest axis. The
 actual step is `max(requested_step, ceil(max_slide_dimension/1536))`; there is no
 full-resolution WSI raster allocation. Coverage/score fields survive threshold
 updates. Typed arrays, one worker, a coalesced next request, generation IDs and
-requestAnimationFrame retain cancellation and bounded processing. Gaussian/mean
-fields reuse scores; majority reruns voting; refinement remains asynchronous.
+requestAnimationFrame retain cancellation and bounded processing. Threshold
+updates reuse cached mean/max score and coverage fields; no
+alternate aggregation or refinement method is exposed.
 
 The finite display raster can omit details narrower than its sampling step,
 including small holes/gaps/components. There is no morphological deletion, but
 sampling is not vector-accurate. Saved GT/derived geometries remain exact vectors.
 There is no viewport-adaptive finer raster or calibrated probability input path.
-CRF neighbors cannot cross separate vector component IDs or uncovered cells;
-subcell background gaps remain a display-resolution limitation. The main/worker
-math is shared; a workerless fallback uses the same aggregate math, with mean
-preview rather than image-guided CRF.
+Medulla-priority can label a covered cell medulla even when the average score is
+below threshold; this is a categorical display convention, not a probability or
+consensus estimate. The main/worker math is shared; a workerless fallback uses the
+same bounded field and overlap rule.
 
 Real screenshots were captured locally from real WSIs and saved predictions,
 with slide identifiers, reviewer data and private paths hidden. They show normal

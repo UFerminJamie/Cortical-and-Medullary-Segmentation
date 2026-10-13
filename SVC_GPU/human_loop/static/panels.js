@@ -16,7 +16,7 @@ function setupPanels() {
   const histogramShell=node('div');$('panel-prediction-display').parentNode.after(histogramShell);histogramShell.append($('histogram'),document.querySelector('.histogram-labels'));
   accordion('score-distribution','Score distribution',[histogramShell]);
   accordion('annotations','Annotations',[$('annotationPanel')],true);
-  accordion('overlap','Overlap / refinement',[$('overlapPanel')]);
+  accordion('overlap','Prediction display',[$('overlapPanel')]);
   accordion('history','History',[$('historyList')]);
   const compute=[...document.querySelectorAll('#tab-model > .inspector-section')];if(compute.length)accordion('compute','Compute / jobs',compute);
   function applySections(){for(const [key,s]of sections){const expanded=S.layout.expanded[key]??s.open;s.body.hidden=!expanded;s.button.setAttribute('aria-expanded',String(expanded));s.button.dataset.expanded=expanded;}
