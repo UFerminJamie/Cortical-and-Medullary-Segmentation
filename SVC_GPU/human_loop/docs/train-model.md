@@ -38,7 +38,9 @@ red medulla, grey excluded, pale outlines for corrected tiles. Samples lacking s
 predictions cannot be selected; run a prediction for them first.
 
 Medullary percentage uses the current saved predictions plus human corrections,
-excluding omitted tiles. Refreshing samples updates prediction versions and correction
+excluding omitted tiles. Per-sample percentages are cached by correction revision
+and prediction/feature file stamps, so unchanged samples need no tile reload when
+reopening the picker. Refreshing samples updates prediction versions and correction
 revisions for retained selections. If a correction changes after selection, preparation
 fails with a refresh message instead of silently training with different labels.
 

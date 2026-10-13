@@ -97,6 +97,36 @@ def test_picker_and_thumbnail_include_combined_labels(setup):
     assert client.get(f"/api/training/samples/{sample['id']}/thumbnail?prediction_id=baseline&revision=0").status_code == 409
 
 
+def test_picker_summary_cache_tracks_corrections_and_prediction_sources(setup, monkeypatch):
+    _, app, client, slides = setup
+    sid = slides['A']['id']
+    correction(client, sid, label=1).raise_for_status()
+    original = app.state.catalog.current_tiles
+    calls = []
+    def current(*args, **kwargs):
+        calls.append(args[0])
+        return original(*args, **kwargs)
+    monkeypatch.setattr(app.state.catalog, 'current_tiles', current)
+    row = lambda: next(s for s in client.get('/api/training/samples').json() if s['id'] == sid)
+    assert row()['medulla_fraction'] == .75
+    assert row()['medulla_fraction'] == .75
+    assert calls == [sid]
+    correction(client, sid, label=0).raise_for_status()
+    calls.clear()
+    assert row()['medulla_fraction'] == .5
+    assert row()['medulla_fraction'] == .5
+    assert calls == [sid]
+    # A changed saved prediction source invalidates the summary even with the same review revision.
+    import pandas as pd
+    path = Path(slides['A']['baseline_csv'])
+    frame = pd.read_csv(path)
+    frame['predicted_label_encoded'] = 0
+    frame.to_csv(path, index=False)
+    calls.clear()
+    assert row()['medulla_fraction'] == 0
+    assert calls == [sid]
+
+
 def test_candidates_fit_only_training_and_publish_validation_metrics(setup, tmp_path, monkeypatch):
     config, app, _, slides = setup
     body = payload(slides)

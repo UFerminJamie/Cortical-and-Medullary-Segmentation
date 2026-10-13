@@ -37,7 +37,7 @@ from .wsi import WsiPool
 from .transport import ApiCompression, encode_view
 from .grid import describe_grid, grid_mask
 from .performance import RequestMetrics
-from .training import selected_labels, training_thumbnail
+from .training import selected_labels, selection_fraction, training_thumbnail
 
 logger = logging.getLogger("renal_review")
 
@@ -487,9 +487,7 @@ def create_app(config: Config | None = None, token: str | None = None) -> FastAP
             # Only corrected slides need tile reads to adjust the cheap prediction summary.
             if row["prediction_available"] and (row.get("manual_tiles") or row.get("excluded_tiles")):
                 try:
-                    _, _, labels, _ = selected_labels(catalog, store, row)
-                    count = int(np.isin(labels, [0, 1]).sum())
-                    row["medulla_fraction"] = float((labels == 1).sum() / count) if count else None
+                    row["medulla_fraction"] = selection_fraction(catalog, store, row)
                 except (ValueError, FileNotFoundError) as error:
                     row.update(prediction_available=False, selection_error=str(error))
         return rows

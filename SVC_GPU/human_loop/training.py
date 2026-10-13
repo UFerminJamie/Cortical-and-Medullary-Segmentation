@@ -10,6 +10,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from .snapshots import file_stamp, resolved_owners, verify_stamp
+from .cache import signature
 from .storage import Conflict, atomic_json, now
 
 
@@ -64,6 +65,26 @@ def selected_labels(catalog, store, entry):
         raise Conflict("Corrections changed since sample selection. Refresh the sample picker before training.")
     labels = np.where(human != -1, human, data["predictions"]).astype(np.int8)
     return data, human, labels, events
+
+
+def selection_fraction(catalog, store, entry):
+    """Keep cohort sorting cheap; only recompute samples whose labels/sources changed."""
+    slide = catalog.slide(entry["id"])
+    sources = [slide["pt_path"], slide["baseline_csv"]]
+    if entry["prediction_id"] != "baseline":
+        sources.append(store.root / "predictions" / entry["id"] / f"{entry['prediction_id']}.npz")
+    stamp = signature(*sources) + str((entry["prediction_id"], entry.get("revision", 0)))
+    key = "training-summary-v1:" + entry["id"]
+    cached = catalog.read_cache.get(key, stamp)
+    if cached is not None:
+        return cached["medulla_fraction"]
+    _, _, labels, _ = selected_labels(catalog, store, entry)
+    total = int(np.isin(labels, [0, 1]).sum())
+    fraction = float((labels == 1).sum() / total) if total else None
+    if signature(*sources) + str((entry["prediction_id"], entry.get("revision", 0))) != stamp:
+        raise Conflict("Sample sources changed; refresh the sample picker")
+    catalog.read_cache.put(key, stamp, {"medulla_fraction": fraction})
+    return fraction
 
 
 def selection_snapshot(catalog, store, directory, job):
