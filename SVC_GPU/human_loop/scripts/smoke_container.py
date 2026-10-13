@@ -29,6 +29,11 @@ def main():
     def get(path):
         return json.load(opener.open(base+path, timeout=10))
 
+    def write(path, payload, method='POST'):
+        request = urllib.request.Request(base+path, data=json.dumps(payload).encode(),
+                                         headers={'Content-Type':'application/json'}, method=method)
+        return json.load(opener.open(request, timeout=20))
+
     assert get("/api/bootstrap")["compute_enabled"] is False
     rows = get("/api/slides")
     assert len(rows) == 4 and all(row["name"].startswith("DEMO_") for row in rows), "Only the synthetic demo is supported"
@@ -45,6 +50,20 @@ def main():
                                          headers={"Content-Type":"application/json"}, method="POST")
         assert len(json.load(opener.open(request))["tile_ids"]) == 16
     assert get("/api/slides/"+sid)["manual_tiles"] == 16
+    layer_url = f'/api/slides/{sid}/annotations/cortical_gt.json'
+    if not args.check_existing:
+        created = write(layer_url, {'reviewer':'Container check', 'revision':None, 'create':True}, 'PUT')
+        polygon = {'type':'Polygon', 'coordinates':[[[650,650],[1150,650],[1150,1150],[650,1150],[650,650]]]}
+        write(layer_url, {'reviewer':'Container check', 'revision':created['revision'],
+                         'operations':[{'action':'add','geometry':polygon}]}, 'PUT')
+        tissue = {'type':'FeatureCollection','features':[{'type':'Feature','properties':{},'geometry':{
+            'type':'Polygon','coordinates':[[[0,0],[detail['width'],0],[detail['width'],detail['height']],[0,detail['height']],[0,0]]]}}]}
+        write(f'/api/slides/{sid}/annotations/Tissue_qc.json', {'reviewer':'Container check','revision':None,'document':tissue}, 'PUT')
+        generation = write(f'/api/slides/{sid}/annotation-generation', {'reviewer':'Container check'})
+        assert generation['status'] == 'current'
+    assert len(get(layer_url)['regions']) == 1
+    assert len(get(f'/api/slides/{sid}/annotations/cortical.json')['regions']) == 1
+    assert get(f'/api/slides/{sid}/annotations')['generation']['status'] == 'current'
     print("CPU container check passed: authenticated API, data mount, tiles, overlays, persistent annotations.")
 
 

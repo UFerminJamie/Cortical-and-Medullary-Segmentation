@@ -94,6 +94,17 @@ class WsiPool:
         finally:
             self._release(entry)
 
+    def thumbnail(self, path: str) -> bytes:
+        """Bounded RGB image guide for spatial refinement; independent of viewport."""
+        entry = self._acquire(path)
+        try:
+            image = entry.slide.get_thumbnail((1024, 1024)).convert('RGB')
+            output = io.BytesIO()
+            image.save(output, format='JPEG', quality=85)
+            return output.getvalue()
+        finally:
+            self._release(entry)
+
     def tile(self, path: str, level: int, x: int, y: int) -> bytes:
         key = (path, level, x, y)
         with self._lock:

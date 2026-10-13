@@ -88,6 +88,18 @@ def test_filter_limited_region_and_clear(setup):
     assert client.get(f"/api/slides/{slide_id}").json()["manual_tiles"] == 0
 
 
+def test_live_preview_filters_do_not_change_prediction_sources(setup):
+    config, app, client, slides = setup
+    sid = slides['A']['id']
+    before = Path(slides['A']['baseline_csv']).read_bytes()
+    response = correction(client, sid, polygon=[[0,0],[512,0],[512,512],[0,512]], visible_only=True,
+        display_threshold=3, filters={'cortex':{'comparison':'all'},'medulla':{'enabled':False}})
+    assert response.status_code == 200 and response.json()['tile_ids'] == [0,1,2,3]
+    assert Path(slides['A']['baseline_csv']).read_bytes() == before
+    assert app.state.store.events(sid)[0]['predicted_labels'] == [0,0,1,1]
+    assert app.state.store.events(sid)[0]['display_threshold'] == 3
+
+
 def test_crash_recovery_and_review_status(setup):
     config, app, client, slides = setup
     slide_id = slides["A"]["id"]

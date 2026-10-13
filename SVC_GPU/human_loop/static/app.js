@@ -60,12 +60,16 @@ function schedulePreferences() {
       model_id:$("modelSelect").value,prediction_threshold:Number($("predictionThreshold").value),
       view_prediction:S.viewPrediction,queue_model:$("queueModelSelect").value,
       executor:S.executor,compute_device:S.device,grid_mode:$("gridMode").value,source_overlap:$("sourceOverlap").value,
+      layout:S.layout,annotation_display:annotations.preferences,prediction_display:predictionOptions(),
       queue_filters:Object.fromEntries(["cohortSelect","statusSelect","splitSelect","tissueSelect","sortSelect"].map(id=>[id,$(id).value]))};
     try { await api("/api/preferences",{method:"POST",body:{...actorPayload(),preferences:preference}}); }
     catch(error) { toast("Preferences could not be saved: "+error.message,true); }
   },650);
 }
 function applyPreferences(preference) {
+  annotations.preferences=preference.annotation_display||{};S.panels?.restore(preference.layout);
+  for(const [id,value] of Object.entries(preference.prediction_display?.controls||{}))if($(id))$(id).value=value;
+  $('tileBoundaries').checked=preference.prediction_display?.boundaries===true;
   if(preference.filters) {
     for(const key of ["cortex","medulla"]) {
       const f=preference.filters[key]; if(!f)continue;
@@ -219,6 +223,7 @@ function fillCohorts(preferred="") {
   $("cohortSelect").value=cohorts.includes(preferred)?preferred:"";
 }
 function clearSlide() {
+  annotations.sequence++;annotations.layers=[];annotations.loaded.clear();annotations.editing=null;annotations.render();S.fieldInfo=null;
   S.raster?.close?.();S.histogramBins=null;S.detail=null;S.data=null;S.mask=null;S.grid=null;S.raster=null;S.history=[];S.historyNext=null;S.highlighted=null;S.cursor=null;
   S.viewPrediction="active";S.viewer.close();
   for(const id of ["overlayCanvas","drawSurface","histogram"]){const canvas=$(id);canvas.getContext("2d").clearRect(0,0,canvas.width,canvas.height);}
@@ -232,6 +237,7 @@ function clearSlide() {
 async function switchDataset() {
   const next=$("datasetSelect").value;
   if(next===S.dataset)return;
+  if(annotations.busy()){ $('datasetSelect').value=S.dataset;toast('Save the annotation file draft before changing datasets.',true);return;}
   if(S.saving||S.bulkBusy||S.datasetBusy||S.pendingPolygon||S.draft.length){
     $("datasetSelect").value=S.dataset;toast("Finish loading, save, or cancel the current region before changing datasets.");return;
   }
@@ -337,6 +343,8 @@ function openSlideImage(detail,signal) {
   });
 }
 async function loadSlide(id,preserve=false,view=null) {
+  if(annotations.busy()){toast('Save or undo the annotation file draft before changing slides.',true);return;}
+  annotations.sequence++;S.tissueRevision='';S.fieldInfo=null;S.transferredField=null;S.fallbackField=null;
   if(S.datasetBusy){toast("Wait for the cohort update to finish.");return;}
   if(S.saving){toast("Wait for the current correction to save.");return;}
   if(S.pendingPolygon){toast("Retry the unsaved region or press Escape before changing slides.",true);return;}
@@ -349,6 +357,8 @@ async function loadSlide(id,preserve=false,view=null) {
   // History never delays usable images or annotation controls.
   const historyRequest=api("/api/slides/"+id+"/history?limit=100",{signal:controller.signal})
     .then(value=>({value}),error=>({error}));
+  const tissueRequest=api('/api/slides/'+id+'/prediction-tissue',{signal:controller.signal})
+    .then(value=>({value}),error=>({error}));
   try {
     const bytes=await navigationCache.read("/api/slides/"+id+"/view"+query,controller.signal);
     const length=new DataView(bytes).getUint32(0,true),offset=4+length;
@@ -357,6 +367,9 @@ async function loadSlide(id,preserve=false,view=null) {
     if(bytes.byteLength-offset!==detail.tiles*20)throw new Error("Prediction data is incomplete");
     S.raster?.close?.();S.raster=null;S.mask=null;S.histogramBins=null;S.history=[];S.historyNext=null;renderHistory();
     S.maskKey=null;S.detail=detail;S.viewPrediction=selection;S.data=new Float32Array(bytes,offset);S.draft=[];S.highlighted=null;S.cursor=null;
+    if(old!==id){$('overlayEnabled').checked=true;$('overlaySource').value='combined';
+      for(const key of ['cortex','medulla']){$(key+'Enabled').checked=true;$(key+'Comparison').value='all';}
+      $('keepManual').checked=true;}
     const imageRequest=(old!==id||!preserve||!S.viewer.world.getItemAt(0))?
       openSlideImage(detail,controller.signal):Promise.resolve();
     // Observe rejection immediately while the worker initializes.
@@ -364,7 +377,12 @@ async function loadSlide(id,preserve=false,view=null) {
     const initialized=await S.engine.initialize(S.data,detail);
     if(sequence!==S.loadSequence)return;
     if(initialized)S.grid=new Map(initialized.grid);else buildGrid();
-    configureGrid();await updateMasks();
+    const tissue=await tissueRequest;
+    if(sequence!==S.loadSequence)return;
+    S.tissueGeometry=tissue.value?.geometry||null;S.tissueRevision=tissue.value?.revision||'';S.tissueStatus=tissue.value?.status||'unavailable';
+    S.engine.tissue(S.tissueGeometry,S.tissueRevision);
+    configureGrid();initializeThreshold();await updateMasks();
+    annotations.load(id,controller.signal).catch(error=>{if(error.name!=='AbortError'&&sequence===S.loadSequence)toast('Annotations: '+error.message,true);});
     if(sequence!==S.loadSequence)return;
     $("slideCohort").textContent=cohortName(detail.cohort).toUpperCase()+" · "+detail.original_split.toUpperCase();
     $("slideTitle").textContent=detail.name;
@@ -403,7 +421,8 @@ function buildGrid() {
 }
 function displayedLabel(index) {
   const off=index*5,human=S.data[off+4],source=S.overlaySource||"combined";
-  return source==="prediction"?S.data[off+3]:source==="human"?human:human!==-1?human:S.data[off+3];
+  const prediction=Number(S.data[off+2]>=(S.liveThreshold??S.detail.prediction_threshold));
+  return source==="prediction"?prediction:source==="human"?human:human!==-1?human:prediction;
 }
 function displayedHuman(index) {return S.overlaySource!=="prediction"&&S.data[index*5+4]!==-1;}
 function revealHumanLabel(label) {
@@ -424,21 +443,23 @@ function tilePass(index,f) {
 async function updateMasks() {
   if(!S.data)return;
   S.overlaySource=$("overlaySource").value;
-  const key=JSON.stringify({...filters(),...gridPayload(),slide:S.detail.id,prediction:S.detail.prediction_id,revision:S.detail.revision});
+  const key=JSON.stringify({...filters(),...gridPayload(),...predictionOptions(),tissue:S.tissueRevision,preview:S.thresholdPreview,slide:S.detail.id,prediction:S.detail.prediction_id,revision:S.detail.revision});
   if(S.mask&&S.maskKey===key){requestRender();return;}
   if(S.engine?.worker) {
     const sequence=++S.maskSequence,id=S.detail.id;
-    const result=await S.engine.filter({...filters(),...gridPayload()});
+    const result=await S.engine.filter({...filters(),...gridPayload(),...predictionOptions(),preview:S.thresholdPreview});
+    if(result.fieldInfo?.score&&S.detail?.id===id)S.transferredField={key:result.fieldInfo.key,score:result.fieldInfo.score,covered:result.fieldInfo.covered};
     if(result.cancelled&&sequence===S.maskSequence&&S.detail?.id===id&&!S.engine.worker)return updateMasks();
     if(result.cancelled||sequence!==S.maskSequence||S.detail?.id!==id){result.raster?.close();return;}
-    S.mask=result.mask;S.maskKey=key;S.detail.manual_tiles=result.manual;S.detail.excluded_tiles=result.excluded;
+    if(!result.fieldInfo&&(predictionOptions().view.startsWith('aggregate')||predictionOptions().view==='raw-label')){S.engine.close();S.maskKey=null;return updateMasks();}
+    S.fieldInfo=result.fieldInfo?{...(S.transferredField?.key===result.fieldInfo.key?S.transferredField:{}),...result.fieldInfo}:null;S.lastComputeMs=result.compute_ms;S.mask=result.mask;S.maskKey=key;S.detail.manual_tiles=result.manual;S.detail.excluded_tiles=result.excluded;
     S.raster?.close?.();S.raster=result.raster;S.histogramBins=result.bins;
     $("excludedCount").textContent=fmt(result.excluded);$("excludedVisible").textContent=fmt(result.excludedVisible)+" / "+fmt(result.excluded);
     $("cortexCount").textContent=fmt(result.totals[0]);$("medullaCount").textContent=fmt(result.totals[1]);$("manualCount").textContent=fmt(result.manual);
     $("cortexVisible").textContent=fmt(result.visible[0])+" / "+fmt(result.totals[0]);$("medullaVisible").textContent=fmt(result.visible[1])+" / "+fmt(result.totals[1]);
     for(const key of ["cortex","medulla"])$(key+"Threshold").disabled=$(key+"Comparison").value==="all";
     $("keepManual").disabled=S.overlaySource==="prediction";
-    requestRender();drawHistogram();return;
+    updateFieldStatus();requestRender();drawHistogram();return;
   }
   const f=filters(),totals=[0,0],visible=[0,0];let manual=0,excluded=0,excludedVisible=0;
   S.mask=new Uint8Array(S.detail.tiles);
@@ -456,19 +477,16 @@ async function updateMasks() {
   $("cortexVisible").textContent=fmt(visible[0])+" / "+fmt(totals[0]);$("medullaVisible").textContent=fmt(visible[1])+" / "+fmt(totals[1]);
   for(const key of ["cortex","medulla"])$(key+"Threshold").disabled=$(key+"Comparison").value==="all";
   $("keepManual").disabled=$("overlaySource").value==="prediction";
-  S.maskKey=key;S.raster=null;requestRender();drawHistogram();
-}
-function makeRaster() {
-  const divisor=Math.max(1,Math.ceil(Math.max(S.detail.width,S.detail.height)/2048)),canvas=document.createElement("canvas");
-  canvas.width=Math.ceil(S.detail.width/divisor);canvas.height=Math.ceil(S.detail.height/divisor);
-  const ctx=canvas.getContext("2d"),size=S.detail.tile_size_level0/divisor;
-  for(let pass=0;pass<2;pass++)for(let index=0;index<S.detail.tiles;index++) {
-    if(!S.mask[index])continue;
-    const o=index*5;if(displayedHuman(index)!==Boolean(pass))continue;
-    const label=displayedLabel(index);ctx.fillStyle=labelColor(label);ctx.globalAlpha=1;
-    ctx.fillRect(S.data[o]/divisor,S.data[o+1]/divisor,Math.max(size,1),Math.max(size,1));
+  S.maskKey=key;S.raster=null;S.fieldInfo=null;
+  const options={...filters(),...gridPayload(),...predictionOptions()};
+  if(options.view.startsWith('aggregate')||options.view==='raw-label'){
+    const fieldKey=JSON.stringify([S.detail.fingerprint,S.detail.prediction_id,S.detail.revision,S.tissueRevision,'mean-score-medulla-priority-v1',options.resolution,options.grid_mode,options.source_overlap]);
+    if(S.fallbackField?.key!==fieldKey)S.fallbackField={key:fieldKey,field:PredictionField.create(S.data,S.detail,options,mainTissueMask(options))};
+    const field=S.fallbackField.field,canvas=document.createElement('canvas');canvas.width=field.width;canvas.height=field.height;
+    const ctx=canvas.getContext('2d'),labels=PredictionField.classify(field,S.liveThreshold),result=PredictionField.pixels(field,labels,options);
+    ctx.putImageData(new ImageData(result.rgba,field.width,field.height),0,0);S.raster=canvas;S.fieldInfo={...field,area:result.area,labels:result.displayed};
   }
-  return canvas;
+  updateFieldStatus();requestRender();drawHistogram();
 }
 function candidates(x0,y0,x1,y1) {
   const found=[],padding=S.detail.tile_size_level0;
@@ -498,28 +516,20 @@ function renderOverlay() {
   const size=S.detail.tile_size_level0*scale;
   canvas.style.opacity=Number($("opacity").value)/100;
   if($("overlayEnabled").checked&&S.mask) {
-    ctx.globalAlpha=1;
-    const ids=size<12?null:candidates(-p0.x/scale,-p0.y/scale,(rect.width-p0.x)/scale,(rect.height-p0.y)/scale);
-    if(size<12||ids.length>4000) {
-      if(!S.raster)S.raster=makeRaster();
-      ctx.drawImage(S.raster,p0.x,p0.y,S.detail.width*scale,S.detail.height*scale);
-    } else {
-      // Paint overlapping patch colors at full opacity, then composite the layer once.
-      // Applying opacity to each of the 75%-overlap rectangles hides the tissue.
-      if(!S.viewportLayer)S.viewportLayer=document.createElement("canvas");
-      const layer=S.viewportLayer;
-      if(layer.width!==canvas.width||layer.height!==canvas.height){layer.width=canvas.width;layer.height=canvas.height;}
-      const layerCtx=layer.getContext("2d");layerCtx.setTransform(dpr,0,0,dpr,0,0);layerCtx.clearRect(0,0,rect.width,rect.height);
-      for(let pass=0;pass<2;pass++)for(const index of ids) {
-        if(!S.mask[index])continue;
-        const off=index*5,human=displayedHuman(index);if(human!==Boolean(pass))continue;
-        const x=p0.x+S.data[off]*scale,y=p0.y+S.data[off+1]*scale;
-        if(x+size<0||y+size<0||x>rect.width||y>rect.height)continue;
-        layerCtx.fillStyle=labelColor(displayedLabel(index));layerCtx.fillRect(x,y,size,size);
-        if(human||size>18) {layerCtx.strokeStyle=human?"#eefff5":"#22333e80";layerCtx.lineWidth=human?1:.5;layerCtx.strokeRect(x,y,size,size);}
-      }
-      ctx.drawImage(layer,0,0,rect.width,rect.height);
+    const view=$('predictionView').value,aggregate=view.startsWith('aggregate'),fieldView=aggregate||view==='raw-label',heatmapOptions=predictionOptions();
+    const ids=candidates(-p0.x/scale,-p0.y/scale,(rect.width-p0.x)/scale,(rect.height-p0.y)/scale);
+    if(fieldView&&S.raster){ctx.imageSmoothingEnabled=false;const f=S.fieldInfo;if(!aggregate)ctx.globalAlpha=.48;ctx.drawImage(S.raster,p0.x,p0.y,(f?.width*f?.step||S.detail.width)*scale,(f?.height*f?.step||S.detail.height)*scale);ctx.globalAlpha=1;}
+    ctx.save();
+    if(S.tissueGeometry&&(!aggregate||$('tileBoundaries').checked)){ctx.beginPath();const polygons=S.tissueGeometry.type==='Polygon'?[S.tissueGeometry.coordinates]:S.tissueGeometry.type==='MultiPolygon'?S.tissueGeometry.coordinates:[];for(const rings of polygons)for(const ring of rings){ring.forEach((p,i)=>i?ctx.lineTo(p0.x+p[0]*scale,p0.y+p[1]*scale):ctx.moveTo(p0.x+p[0]*scale,p0.y+p[1]*scale));ctx.closePath();}ctx.clip('evenodd');}
+    if(!aggregate||$('tileBoundaries').checked)for(const index of ids) {
+      if(!S.mask[index])continue;const off=index*5,x=p0.x+S.data[off]*scale,y=p0.y+S.data[off+1]*scale;
+      if(x+size<0||y+size<0||x>rect.width||y>rect.height)continue;
+      const label=displayedLabel(index),human=displayedHuman(index),rgb=PredictionField.color(S.data[off+2],S.detail.score_range,heatmapOptions);
+      ctx.strokeStyle=human?'#eefff5':labelColor(label);ctx.lineWidth=human?1.5:1;
+      if(!aggregate&&view==='raw-score'){ctx.globalAlpha=.12;ctx.fillStyle=human?labelColor(label):'rgb('+rgb.join(',')+')';ctx.fillRect(x,y,size,size);ctx.globalAlpha=1;ctx.strokeStyle='rgb('+rgb.join(',')+')';}
+      ctx.strokeRect(x,y,size,size);
     }
+    ctx.restore();
   }
 }
 function drawAnnotations() {
@@ -535,6 +545,7 @@ function drawAnnotations() {
     if(points.length>2)ctx.closePath();ctx.strokeStyle=color;ctx.lineWidth=2;ctx.setLineDash(dash?[6,4]:[]);ctx.stroke();
     if(points.length>2){ctx.fillStyle=color+"18";ctx.fill();}ctx.setLineDash([]);
   }
+  annotations.draw(ctx,p0,scale);
   if(S.highlighted)polygon(S.highlighted,"#ffffff",true);
   if(S.pendingPolygon)polygon(S.pendingPolygon,"#ffc478",true);
   if(S.draft.length) {
@@ -543,7 +554,7 @@ function drawAnnotations() {
   }
 }
 function drawHistogram() {
-  if(!S.data)return;
+  if(!S.data||$('histogram').closest('[hidden]'))return;
   const canvas=$("histogram"),ctx=canvas.getContext("2d"),width=canvas.width,height=canvas.height;
   ctx.clearRect(0,0,width,height);const min=S.detail.score_range[0],max=S.detail.score_range[1],span=Math.max(max-min,.01),bins=[new Uint32Array(60),new Uint32Array(60)];
   if(S.histogramBins){bins[0]=S.histogramBins[0];bins[1]=S.histogramBins[1];}
@@ -566,6 +577,7 @@ function imagePoint(event) {
   return [Math.max(0,Math.min(S.detail.width,point.x)),Math.max(0,Math.min(S.detail.height,point.y))];
 }
 function setMode(mode) {
+  if(annotations.editing&&mode!=='pan'){toast('Apply or cancel vertex editing first.');return;}
   if(S.saving||S.pendingPolygon){toast("Finish saving the current region first.");return;}
   S.mode=mode;S.draft=[];S.drag=null;S.cursor=null;
   document.querySelectorAll("[data-tool]").forEach(button=>button.classList.toggle("active",button.dataset.tool===mode));
@@ -588,6 +600,7 @@ async function finishPolygon() {
   await saveRegion(points);
 }
 async function saveRegion(points) {
+  if($('annotationTarget').value!=='corrections'){annotations.add(points);return;}
   if(S.saving||S.loading||!S.detail)return;
   if(!$("reviewer").value.trim()){toast("Enter your reviewer name before annotating.",true);return;}
   S.saving=true;S.pendingPolygon=points;S.draft=[];S.cursor=null;$("retrySave").hidden=true;
@@ -597,6 +610,7 @@ async function saveRegion(points) {
       ...gridPayload(),action:S.label===-1?"clear":"label",label:S.label,polygon:points,revision:S.detail.revision,
       fingerprint:S.detail.fingerprint,prediction_id:S.detail.prediction_id,
       view_prediction_id:S.detail.prediction_id,shape:S.mode,
+      display_threshold:S.liveThreshold,
       visible_only:$("visibleOnly").checked,filters:filters(),note:$("regionNote").value}});
     navigationCache.invalidateSlide(S.detail.id);
     for(const index of result.tile_ids)S.data[index*5+4]=result.label;
@@ -619,6 +633,7 @@ async function saveRegion(points) {
 }
 function updateButtons() {
   const blocked=S.saving||S.loading||S.datasetBusy||!S.detail;
+  $('undoButton').title=$('annotationTarget').value==='corrections'?'Undo last tile correction':'Undo file edit';
   const datasetBlocked=S.saving||S.bulkBusy||S.datasetBusy||Boolean(S.pendingPolygon)||S.draft.length>0;
   $("datasetSelect").disabled=datasetBlocked;$("addDatasetButton").disabled=datasetBlocked||S.loading||S.queueBusy;$("refreshDatasetsButton").disabled=datasetBlocked||S.loading||S.queueBusy;
   $("predictButton").disabled=blocked||S.jobs.some(job=>job.kind==="predict"&&job.slide_id===S.detail?.id&&["preparing","submitting","pending","running","submitted","unknown"].includes(job.status));
@@ -644,7 +659,7 @@ async function undoEvent(id) {
     S.saving=false;await loadSlide(S.detail.id,true);await refreshQueue();toast("Correction undone. Its history is retained.");}
   catch(error){toast(error.message,true);}finally{S.saving=false;updateButtons();}
 }
-function undoLatest() {const event=S.history.find(item=>["label","clear"].includes(item.action)&&!item.undone);if(event)undoEvent(event.id);}
+function undoLatest() {if($('annotationTarget').value!=='corrections'){annotations.undo($('annotationTarget').value);return;}const event=S.history.find(item=>["label","clear"].includes(item.action)&&!item.undone);if(event)undoEvent(event.id);}
 async function reviewedNext(advance=true) {
   if(S.saving||S.loading||S.pendingPolygon||S.draft.length||!S.detail)return;
   const oldId=S.detail.id,index=S.filtered.findIndex(row=>row.id===oldId),next=S.filtered[index+1];
@@ -658,6 +673,7 @@ async function reviewedNext(advance=true) {
   }catch(error){toast(error.message,true);}finally{S.saving=false;updateButtons();}
 }
 function renderHistory() {
+  if($('historyList').closest('[hidden]'))return;
   const pass=$("historyPass").value,events=S.history.filter(event=>pass==="all"||event.pass_id===pass);
   if(!events.length){$("historyList").replaceChildren(node("div",{class:"empty-state",text:"No corrections in this view yet. Completed regions are saved here automatically."}));return;}
   const rows=events.map(event=>{
@@ -693,6 +709,7 @@ function focusRegion(points) {
 function selectTab(tab) {
   document.querySelectorAll("[data-tab]").forEach(button=>{button.classList.toggle("active",button.dataset.tab===tab);button.setAttribute("aria-selected",button.dataset.tab===tab?"true":"false");});
   document.querySelectorAll(".tab-content").forEach(panel=>panel.classList.toggle("active",panel.id==="tab-"+tab));
+  if(tab==='history')renderHistory();if(tab==='annotate')annotations.render();
   if(tab==="model")refreshTrainingSummary().catch(error=>toast(error.message,true));
 }
 async function refreshTrainingSummary() {
@@ -700,7 +717,7 @@ async function refreshTrainingSummary() {
   $("trainingSummary").replaceChildren(node("div",{text:fmt(plan.corrected_tiles)+" confirmed tiles across "+fmt(plan.corrected_slides)+" slides"}),
     node("div",{text:fmt(plan.excluded_tiles)+" excluded tiles omitted from retraining"}),node("div",{text:fmt(plan.original_train_slides)+" original training slides included"}));return plan;
 }
-async function openTraining() {$("trainExecutorSelect").value=S.executor;$("trainDialog").showModal();await updateTrainPlan();}
+async function openTraining() {$("trainExecutorSelect").value=S.executor;await trainingWorkspace.open();}
 async function updateTrainPlan() {
   $("submitTraining").disabled=true;
   try {
@@ -728,11 +745,13 @@ async function submitJob(kind) {
 }
 function renderJobs() {
   const active=S.jobs.filter(job=>["preparing","submitting","pending","running","submitted","unknown"].includes(job.status));$("jobsCount").textContent=active.length;
-  const latest=active[0]||S.jobs[0];$("jobStatusLink").textContent=latest?(latest.kind==="train"?"Retraining":"Prediction")+" · "+latest.status+(latest.slurm_id?" · job "+latest.slurm_id:""):"GPU jobs run in the background";
+  const latest=active[0]||S.jobs[0];$("jobStatusLink").textContent=latest?(latest.kind==="train"?"Retraining":"Prediction")+" · "+latest.status+(latest.slurm_id?" · job "+latest.slurm_id:""):S.computeEnabled?'GPU jobs run in the background':'CPU review · file drafts need Save';
   if(!S.jobs.length){$("jobList").replaceChildren(node("div",{class:"empty-state",text:"No review jobs yet. Predict a slide or retrain after annotating."}));return;}
   $("jobList").replaceChildren(...S.jobs.map(job=>node("div",{class:"job-row",onclick:()=>showLogs(job.id)},[
-    node("div",{class:"job-row-title"},[node("span",{text:job.kind==="train"?"Retrain from human review":job.slide_name}),node("span",{class:"job-badge "+job.status,text:job.status+(job.total?" · "+(job.completed||0)+"/"+job.total+" · "+(job.failed||0)+" failed":"")})]),
+    node("div",{class:"job-row-title"},[node("span",{text:job.kind==="train"?(job.model_name||"Retrain from human review"):job.slide_name}),node("span",{class:"job-badge "+job.status,text:job.status+(job.total?" · "+(job.completed||0)+"/"+job.total+" · "+(job.failed||0)+" failed":"")})]),
     node("div",{class:"job-row-meta",text:"Threshold "+job.threshold+" · "+new Date(job.created_at).toLocaleString()+(job.slurm_id?" · Slurm "+job.slurm_id:"")}),
+    ...(job.training_mode?[node('div',{class:'job-row-meta',text:job.training_samples.length+' training samples · '+job.validation_samples.length+' validation samples · C: '+job.c_values.join(', ')})]:[]),
+    ...(job.candidates||[]).filter(c=>c.status==='failed').map(c=>node('div',{class:'job-row-meta',text:'C='+c.C+' failed: '+c.error})),
     ...(job.error?[node("div",{class:"job-row-meta",text:job.error})]:[])])));
 }
 async function showLogs(id) {S.selectedJob=id;const logs=await api("/api/jobs/"+id+"/logs");$("jobLogs").hidden=false;$("jobLogs").textContent=(logs.stdout||"Waiting for worker output…")+(logs.stderr?"\n\nErrors:\n"+logs.stderr:"");}
@@ -742,14 +761,14 @@ async function pollJobs() {
     for(const job of jobs) {
       const previous=S.knownJobs.get(job.id);S.knownJobs.set(job.id,job.status);
       if(previous&&previous!==job.status&&["completed","completed_with_errors"].includes(job.status)) {
-        const boot=await api("/api/bootstrap");S.models=boot.models;fillModels(job.kind==="train"?job.id:null);
+        const boot=await api("/api/bootstrap");S.models=boot.models;fillModels(job.kind==="train"&&!job.training_mode?job.id:null);trainingWorkspace.results();
         toast(job.kind==="train"?"New reviewed SVC is ready. Select it to predict a slide.":"New predictions are ready"+(job.failed?" · "+job.failed+" slides failed; inspect Jobs":"."),Boolean(job.failed));
         if(job.kind==="predict")S.refreshQueue=true;
         if(job.kind==="predict"&&(job.slide_id===S.detail?.id||job.slide_ids?.includes(S.detail?.id)))S.refreshPrediction=true;
       }
       if(previous&&previous!==job.status&&job.status==="failed")toast("GPU job failed: "+(job.error||"Open Jobs to inspect the logs."),true);
     }
-    S.jobs=jobs;renderJobs();updateButtons();
+    S.jobs=jobs;renderJobs();updateButtons();trainingWorkspace.counts();
     if(S.refreshQueue&&!S.queueBusy&&!S.datasetBusy){S.refreshQueue=false;await refreshQueue();}
     await pollBulk();
     if(S.refreshPrediction&&!S.saving&&!S.pendingPolygon&&!S.draft.length&&!S.loading&&!S.datasetBusy&&S.detail){S.refreshPrediction=false;await loadSlide(S.detail.id,true);}
@@ -787,6 +806,7 @@ function setExecutor(choice,persist=true) {
   S.executor=choice;$("executorSelect").value=choice;$("trainExecutorSelect").value=choice;
   $("executorHint").textContent=choice==="local"?"Uses the GPU and memory already allocated to this session. No new Slurm job is submitted.":"Submits a separate GPU job under the configured Slurm account. The CPU viewer stays available while it queues and runs.";
   if(!S.computeEnabled){
+    for(const id of ['trainButton','jobsButton'])$(id).hidden=true;document.querySelector('[data-tab="model"]').hidden=true;
     $("executorHint").textContent="GPU prediction and retraining are disabled in this deployment. Saved predictions and annotation tools remain available.";
     $("jobStatusLink").textContent="CPU review · annotations autosave";
   }
@@ -880,28 +900,62 @@ function finishFreehand() {
   saveRegion(points);
 }
 function inspectHover(event) {
-  if(!S.detail||!S.data)return;
-  const point=imagePoint(event);if(!point)return;const size=S.detail.tile_size_level0;
-  let best=-1,distance=Infinity;
-  for(const index of candidates(point[0]-size,point[1]-size,point[0]+size,point[1]+size)) {
-    if(!S.mask[index])continue;const offset=index*5,x=S.data[offset],y=S.data[offset+1];
-    if(point[0]<x||point[0]>x+size||point[1]<y||point[1]>y+size)continue;
-    const d=(point[0]-x-size/2)**2+(point[1]-y-size/2)**2;if(d<distance){best=index;distance=d;}
-  }
-  if(best<0){$("hoverInfo").textContent="No visible prediction tile here";return;}
-  const off=best*5,human=S.data[off+4],prediction=S.data[off+3];
-  $("hoverInfo").textContent="tile "+best+" · score "+S.data[off+2].toFixed(3)+" · model "+(prediction===0?"cortex":"medulla")+
-    (human!==-1?" · human "+labelName(human):"")+" · ("+S.data[off]+", "+S.data[off+1]+")";
+  if(!S.detail||!S.data)return;const point=imagePoint(event);if(!point)return;
+  const size=S.detail.tile_size_level0,ids=candidates(point[0]-size,point[1]-size,point[0]+size,point[1]+size).filter(i=>{const o=i*5;return gridPass(i)&&point[0]>=S.data[o]&&point[0]<S.data[o]+size&&point[1]>=S.data[o+1]&&point[1]<S.data[o+1]+size;});
+  const f=S.fieldInfo,x=f?Math.floor(point[0]/f.step):-1,y=f?Math.floor(point[1]/f.step):-1,p=f&&x>=0&&y>=0&&x<f.width&&y<f.height?y*f.width+x:-1;
+  if(!ids.length||(f&&(p<0||!f.covered?.[p]&& !f.count?.[p]))){$('hoverInfo').textContent='Uncovered / outside selected tissue';return;}
+  let text=ids.length+' contributing tiles · '+ids.slice(0,12).map(i=>i+': '+S.data[i*5+2].toFixed(3)).join(', ')+(ids.length>12?'…':'');
+  if(f&&p>=0)text+=' · aggregate '+f.score[p].toFixed(3)+' · displayed '+({1:'medulla',0:'cortex','-2':'excluded','-1':'hidden'}[f.labels[p]]);
+  else text+=' · ≥ '+S.liveThreshold.toFixed(2)+' → medulla';$('hoverInfo').textContent=text;
+}
+function predictionOptions(){
+  const ids=['predictionView','rasterResolution','heatmapPalette','heatmapLow','heatmapMid','heatmapHigh'];
+  return {heatmap_palette:$('heatmapPalette').value,heatmap_low:$('heatmapLow').value,heatmap_mid:$('heatmapMid').value,heatmap_high:$('heatmapHigh').value,view:$('predictionView').value,overlap_rule:'medulla-priority-v1',resolution:Number($('rasterResolution').value),classification_threshold:S.liveThreshold??S.detail?.prediction_threshold??0,boundaries:$('tileBoundaries').checked,controls:Object.fromEntries(ids.map(id=>[id,$(id).value]))};
+}
+function initializeThreshold(){S.liveThreshold=S.detail.prediction_threshold;S.thresholdPreview=false;
+  const [lo,hi]=S.detail.score_range;for(const id of ['liveThreshold','liveThresholdNumber']){$(id).min=Math.min(lo,S.liveThreshold)-.5;$(id).max=Math.max(hi,S.liveThreshold)+.5;$(id).value=S.liveThreshold;}}
+let thresholdFrame=false;
+function liveThreshold(value,preview=true){if(!Number.isFinite(value))return;S.liveThreshold=value;S.thresholdPreview=preview;
+  $('liveThreshold').value=value;$('liveThresholdNumber').value=value;
+  if(!thresholdFrame){thresholdFrame=true;requestAnimationFrame(()=>{thresholdFrame=false;updateMasks().catch(e=>toast(e.message,true));});}
+}
+function updateFieldStatus(){const options=predictionOptions(),f=S.fieldInfo;
+  $('heatmapLegend').querySelector('i').style.background='linear-gradient(to right,'+PredictionField.palette(options).map(rgb=>'rgb('+rgb.join(',')+')').join(',')+')';
+  $('heatmapLegend').setAttribute('aria-label','Decision scores from low to high · '+options.heatmap_palette+' palette');
+  $('heatmapLegend').hidden=!options.view.includes('score');$('heatmapMin').textContent=S.detail.score_range[0].toFixed(2);$('heatmapMax').textContent=S.detail.score_range[1].toFixed(2)+' · decision score';
+  $('thresholdStatus').textContent='Preview only · ≥ threshold: medulla · medulla wins tile overlaps';
+  $('fieldStatus').textContent=f?f.width+' × '+f.height+' · '+f.step+' px / cell · transparent: uncovered'+(!S.tissueRevision?' · tissue unavailable':''):'Tile counts · overlaps inspectable';
+  if(f){$('cortexCount').textContent='≈ '+(f.area[0]/1e6).toFixed(2)+' M px²';$('medullaCount').textContent='≈ '+(f.area[1]/1e6).toFixed(2)+' M px²';}
+  else {for(const id of ['cortexCount','medullaCount'])$(id).textContent+=' tiles';}
+}
+async function predictionTissue(signal){const slide=S.detail?.id,sequence=S.loadSequence;if(!slide)return;
+  try{const result=await api('/api/slides/'+slide+'/prediction-tissue',{signal});if(sequence!==S.loadSequence||slide!==S.detail?.id)return;S.tissueGeometry=result.geometry||null;S.tissueRevision=result.revision||'';S.engine.tissue(S.tissueGeometry,S.tissueRevision);S.maskKey=null;await updateMasks();}
+  catch(e){if(e.name!=='AbortError')toast('Tissue clipping: '+e.message,true);}
+}
+function mainTissueMask(options){if(!S.tissueGeometry)return null;const step=Math.max(options.resolution,Math.ceil(Math.max(S.detail.width,S.detail.height)/1536)),canvas=document.createElement('canvas');canvas.width=Math.ceil(S.detail.width/step);canvas.height=Math.ceil(S.detail.height/step);return PredictionField.tissueMask(S.tissueGeometry,canvas.width,canvas.height,step,canvas);}
+function exportPredictionView(metadata=false){if(!S.raster||!S.fieldInfo){toast('Choose an aggregated view first.');return;}const f=S.fieldInfo,stamp=new Date().toISOString().replaceAll(':','-'),name='histoloop-preview-'+stamp;
+  const download=(blob,extension)=>{const url=URL.createObjectURL(blob),link=node('a',{href:url,download:name+extension});link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+  if(metadata)download(new Blob([JSON.stringify({version:1,created_at:new Date().toISOString(),slide_id:S.detail.id,prediction_id:S.detail.prediction_id,model_id:S.detail.model_id,fingerprint:S.detail.fingerprint,tissue_revision:S.tissueRevision||null,algorithm:'bounded-mean-score-medulla-priority-v1',...predictionOptions(),output:{width:f.width,height:f.height,step_level0:f.step,origin_level0:[0,0]},score_orientation:'score >= threshold means medulla',overlap_rule:'Any covering medulla tile makes the displayed cell medulla; mean score is retained for the heatmap. This is a display rule, not confidence.',uncalibrated:true,uncovered:'transparent'},null,2)],{type:'application/json'}),'.json');
+  else {const canvas=document.createElement('canvas');canvas.width=f.width;canvas.height=f.height;canvas.getContext('2d').drawImage(S.raster,0,0);canvas.toBlob(blob=>download(blob,'.png'));}
 }
 function wireEvents() {
   window.addEventListener("beforeunload",event=>{
-    if(S.saving||S.pendingPolygon||S.draft.length){event.preventDefault();event.returnValue="";}
+    if(S.saving||S.pendingPolygon||S.draft.length||annotations.busy()){event.preventDefault();event.returnValue="";}
   });
   window.addEventListener("pagehide",event=>{if(!event.persisted){cancelSlideLoad();S.queueController?.abort();S.engine?.close();}});
   document.addEventListener("visibilitychange",()=>{
     if(document.hidden)navigationCache.cancel();else if(S.detail&&!S.loading)navigationCache.schedule(S.filtered,S.detail.id);
   });
-  setupPanels();
+  annotations.setup();setupPanels();trainingWorkspace.setup();
+  $('heatmapPalette').onchange=()=>{S.maskKey=null;updateMasks().catch(e=>toast(e.message,true));schedulePreferences();};
+  for(const id of ['heatmapLow','heatmapMid','heatmapHigh'])$(id).oninput=()=>{$('heatmapPalette').value='custom';S.maskKey=null;updateMasks().catch(e=>toast(e.message,true));schedulePreferences();};
+  $('liveThreshold').oninput=()=>liveThreshold(Number($('liveThreshold').value),true);
+  $('liveThresholdNumber').oninput=()=>liveThreshold(Number($('liveThresholdNumber').value),true);
+  $('liveThreshold').onchange=()=>liveThreshold(Number($('liveThreshold').value),false);
+  $('thresholdReset').onclick=()=>liveThreshold(S.detail.prediction_threshold,false);
+  for(const id of ['predictionView','rasterResolution'])$(id).onchange=()=>{S.thresholdPreview=false;updateMasks().catch(e=>toast(e.message,true));schedulePreferences();};
+  $('exportMap').onclick=()=>exportPredictionView();$('exportMapMetadata').onclick=()=>exportPredictionView(true);
+  $('tileBoundaries').onchange=()=>{requestRender();schedulePreferences();};
   for(const id of ["gridMode","sourceOverlap"])$(id).onchange=()=>{if(S.saving||S.pendingPolygon||S.draft.length){$("gridMode").value=S.activeGrid.grid_mode;$("sourceOverlap").value=S.activeGrid.source_overlap;toast("Save or cancel the region before changing grids.");return;}configureGrid();updateMasks().catch(error=>toast(error.message,true));schedulePreferences();};
   $("predictionScope").onchange=()=>{updatePredictionPlan();updateButtons();};
   $("datasetSelect").onchange=()=>switchDataset().catch(error=>toast(error.message,true));
@@ -970,6 +1024,7 @@ function wireEvents() {
     if(key==="h")setMode("pan");else if(key==="r")setMode("rectangle");else if(key==="p")setMode("polygon");else if(key==="b")setMode("freehand");
     else if(key==="c")setLabel(0);else if(key==="m")setLabel(1);else if(key==="x")setLabel(-2);else if(key==="f")S.viewer.viewport.goHome();
     else if(key==="n")navigate(1);else if(key==="v")reviewedNext();else if(key==="enter")finishPolygon();
+    else if(key==='escape'&&annotations.editing){annotations.editing=null;setMode('pan');annotations.render();requestRender();}
     else if(key==="escape"&&!S.saving){S.pendingPolygon=null;S.draft=[];S.drag=null;S.highlighted=null;$("retrySave").hidden=true;updateButtons();requestRender();savedStatus("All completed corrections are saved");}
     else if(key==="/"){event.preventDefault();$("search").focus();}
   });

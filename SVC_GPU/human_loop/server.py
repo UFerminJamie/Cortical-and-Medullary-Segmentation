@@ -10,6 +10,7 @@ import logging
 import resource
 import secrets
 import socket
+import threading
 import time
 import os
 from dataclasses import replace
@@ -19,13 +20,14 @@ from urllib.parse import urlparse
 
 import numpy as np
 import anyio.to_thread
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .catalog import Catalog
 from .cache import BoundedCache, signature
 from .annotations import correction_record
+from .annotation_files import AnnotationFiles, Document, SOURCE_NAMES
 from .bulk import BulkLabels
 from .config import PACKAGE, Config, allocated_gpu
 from .geometry import filter_mask, region_indices
@@ -36,6 +38,7 @@ from .wsi import WsiPool
 from .transport import ApiCompression, encode_view
 from .grid import describe_grid, grid_mask
 from .performance import RequestMetrics
+from .training import selected_labels, selection_fraction, training_thumbnail
 
 logger = logging.getLogger("renal_review")
 
@@ -49,8 +52,11 @@ def create_app(config: Config | None = None, token: str | None = None) -> FastAP
             raise ValueError(f"{name} must be positive")
     store, pool = Store(config.state_dir), WsiPool(config.wsi_handles, config.jpeg_cache_mib * 1024**2)
     responses = BoundedCache(16, config.response_cache_mib * 1024**2)
+    training_images = BoundedCache(256, min(16, config.response_cache_mib) * 1024**2)
+    training_image_locks = tuple(threading.Lock() for _ in range(64))
     timings = RequestMetrics()
     catalog = Catalog(config, store)
+    annotation_files = AnnotationFiles(config, catalog)
     jobs = Jobs(config, store, catalog)
     bulk = BulkLabels(store, catalog)
     if token is None:
@@ -72,12 +78,14 @@ def create_app(config: Config | None = None, token: str | None = None) -> FastAP
             pool.close()
             catalog.read_cache.close()
             responses.clear()
+            training_images.clear()
             limiter.total_tokens = previous
 
     app = FastAPI(title="HistoLoop", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.config, app.state.store, app.state.catalog = config, store, catalog
     app.state.pool, app.state.jobs, app.state.token = pool, jobs, token
     app.state.bulk = bulk
+    app.state.annotation_files = annotation_files
     app.state.responses = responses
     app.add_middleware(ApiCompression, minimum_size=2048, compresslevel=3)
 
@@ -169,6 +177,71 @@ def create_app(config: Config | None = None, token: str | None = None) -> FastAP
         return {"wsi": pool.metrics(), "responses": responses.metrics(),
                 "saved_predictions": catalog._saved_cache.metrics(), "request_threads": config.request_threads,
                 "requests": timings.snapshot(), "peak_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024}
+
+    @app.get('/api/slides/{slide_id}/annotations')
+    def annotation_layers(slide_id: str):
+        annotation_files.recover(slide_id)
+        return annotation_files.list(slide_id)
+
+    @app.get('/api/slides/{slide_id}/annotations/{layer}')
+    def annotation_document(slide_id: str, layer: str):
+        return annotation_files.read(slide_id, layer)
+
+    @app.put('/api/slides/{slide_id}/annotations/{layer}')
+    def annotation_save(slide_id: str, layer: str, payload: dict, background: BackgroundTasks):
+        payload['reviewer'] = actor(payload)
+        result = annotation_files.save(slide_id, layer, payload)
+        if layer in SOURCE_NAMES:
+            background.add_task(annotation_files.regenerate, slide_id)
+        return result
+
+    @app.post('/api/slides/{slide_id}/annotation-generation')
+    def annotation_generation(slide_id: str, payload: dict):
+        actor(payload)
+        return annotation_files.regenerate(slide_id, payload.get('tissue_id'))
+
+    @app.post('/api/slides/{slide_id}/annotation-tissue-copy')
+    def annotation_tissue_copy(slide_id: str, payload: dict, background: BackgroundTasks):
+        reviewer = actor(payload)
+        result = annotation_files.copy_tissue_to_working(slide_id, payload.get('tissue_id'), reviewer)
+        background.add_task(annotation_files.regenerate, slide_id, result['tissue_id'])
+        return result
+
+    @app.post('/api/annotation-preview')
+    def annotation_preview(payload: dict):
+        actor(payload)
+        return Document(payload['document']).edit(payload.get('operations', []))
+
+    @app.get('/api/slides/{slide_id}/annotation-versions/{layer}')
+    def annotation_versions(slide_id: str, layer: str):
+        return annotation_files.versions(slide_id, layer)
+
+    @app.post('/api/slides/{slide_id}/annotation-versions/{layer}')
+    def annotation_restore(slide_id: str, layer: str, payload: dict, background: BackgroundTasks):
+        payload['reviewer'] = actor(payload)
+        result = annotation_files.restore(slide_id, layer, payload)
+        if layer in SOURCE_NAMES:
+            background.add_task(annotation_files.regenerate, slide_id)
+        return result
+
+    @app.get('/api/slides/{slide_id}/prediction-tissue')
+    def prediction_tissue(slide_id: str):
+        try:
+            identity, path, document = annotation_files.tissue(slide_id)
+            from .annotation_files import checksum
+            return {'status': 'available', 'identity': identity, 'revision': checksum(path), 'geometry': __import__('shapely').geometry.mapping(document.union())}
+        except ValueError as error:
+            return {'status': 'unavailable', 'error': str(error)}
+
+    @app.get('/api/wsi/{slide_id}/thumbnail')
+    def prediction_image_guide(slide_id: str):
+        slide = catalog.slide(slide_id)
+        key = 'guide:' + signature(slide['wsi_path'])
+        image = responses.get(key)
+        if image is None:
+            image = pool.thumbnail(slide['wsi_path'])
+            responses.put(key, image, len(image))
+        return Response(image, media_type='image/jpeg')
 
     @app.get("/")
     def index():
@@ -306,8 +379,12 @@ def create_app(config: Config | None = None, token: str | None = None) -> FastAP
             raise ValueError("Label must be cortex (0), medulla (1), or excluded (-2)")
         polygon = payload.get("polygon", [])
         filters = payload.get("filters", {})
-        effective = np.where(labels != -1, labels, data["predictions"])
-        eligible = filter_mask(data["scores"], effective, labels, filters, data["predictions"]) if payload.get("visible_only", True) else None
+        display_threshold = float(payload.get('display_threshold', data['prediction_threshold']))
+        if not math.isfinite(display_threshold):
+            raise ValueError('Display threshold must be finite')
+        preview_predictions = (data['scores'] >= display_threshold).astype(np.int8)
+        effective = np.where(labels != -1, labels, preview_predictions)
+        eligible = filter_mask(data["scores"], effective, labels, filters, preview_predictions) if payload.get("visible_only", True) else None
         selected_grid = grid_mask(data["coordinates"], data["tile_size"], payload.get("grid_mode", "native"),
                                   payload.get("source_overlap", "auto"), data.get("grid"))
         eligible = selected_grid if eligible is None else eligible & selected_grid
@@ -409,7 +486,47 @@ def create_app(config: Config | None = None, token: str | None = None) -> FastAP
             slide_ids=payload.get("slide_ids"),
             model_id=str(payload.get("model_id", "baseline")), threshold=float(payload.get("threshold", -1.0)),
             budget=int(payload.get("budget", 100000)), reviewer=actor(payload), pass_id=str(payload.get("pass_id", "pass-1")),
-            executor=payload.get("executor"))
+            executor=payload.get("executor"), training_samples=payload.get("training_samples"),
+            validation_samples=payload.get("validation_samples"), model_name=payload.get("model_name", ""),
+            c_values=payload.get("c_values"))
+
+    @app.get("/api/training/samples")
+    def training_samples(pass_id: str = "pass-1"):
+        rows = catalog.listing(pass_id)
+        for row in rows:
+            row["revision"] = row.get("revision", 0)
+            # Only corrected slides need tile reads to adjust the cheap prediction summary.
+            if row["prediction_available"] and (row.get("manual_tiles") or row.get("excluded_tiles")):
+                try:
+                    row["medulla_fraction"] = selection_fraction(catalog, store, row)
+                except (ValueError, FileNotFoundError) as error:
+                    row.update(prediction_available=False, selection_error=str(error))
+        return rows
+
+    @app.get("/api/training/samples/{slide_id}/thumbnail")
+    def training_image(request: Request, slide_id: str, prediction_id: str, revision: int = 0):
+        slide = catalog.slide(slide_id)
+        if store.summary().get(slide_id, {}).get("revision", 0) != revision:
+            raise Conflict("Corrections changed; refresh the sample picker")
+        version = next((v for v in catalog.prediction_versions(slide_id) if v["job_id"] == prediction_id), None)
+        if version is None:
+            raise ValueError("Unknown saved prediction; refresh the sample picker")
+        sources = [slide["wsi_path"], slide["pt_path"], slide["baseline_csv"]]
+        if version.get("path"):
+            sources.append(version["path"])
+        key = signature(*sources) + str((slide_id, prediction_id, revision, version["threshold"]))
+        etag = '"' + hashlib.sha256(key.encode()).hexdigest() + '"'
+        headers = {"Cache-Control": "private, no-cache", "ETag": etag}
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        # Returning to a cached thumbnail does not reread tile matrices or corrections.
+        with training_image_locks[int(etag[1:9], 16) % len(training_image_locks)]:
+            cached = training_images.get(key)
+            if cached is None:
+                data, human, labels, _ = selected_labels(catalog, store, {"id": slide_id, "prediction_id": prediction_id, "revision": revision})
+                cached = training_thumbnail(pool, slide, data, human, labels)
+                training_images.put(key, cached, len(cached))
+        return Response(cached, media_type="image/jpeg", headers=headers)
 
     @app.get("/api/jobs")
     def job_list():
@@ -436,7 +553,7 @@ def main():
     parser.add_argument("--executor", choices=["auto", "slurm", "local"], default=os.environ.get("HISTOLOOP_EXECUTOR", "auto"))
     parser.add_argument("--device", choices=["gpu", "cpu"], default=defaults.device,
                         help="CPU mode reviews slides without a GPU and submits compute jobs through Slurm")
-    for flag in ("state-dir", "manifest", "predictions", "datasets-file", "cache-dir",
+    for flag in ("state-dir", "manifest", "predictions", "datasets-file", "cache-dir", "annotation-root", "contour-root", "annotation-sources",
                  "original-manifest", "original-features", "baseline-model", "account", "qos",
                  "gpu-partition", "gpu-resource", "job-memory", "job-time"):
         parser.add_argument("--" + flag, default=getattr(defaults, flag.replace("-", "_")))
@@ -454,6 +571,7 @@ def main():
                     manifest=str(Path(args.manifest).resolve()), predictions=str(Path(args.predictions).resolve()),
                     datasets_file=str(Path(args.datasets_file).resolve()) if args.datasets_file else "",
                     cache_dir=str(Path(args.cache_dir).resolve()) if args.cache_dir else "",
+                    annotation_root=args.annotation_root, contour_root=args.contour_root, annotation_sources=args.annotation_sources,
                     request_threads=args.request_threads, wsi_handles=args.wsi_handles,
                     jpeg_cache_mib=args.jpeg_cache_mib, prediction_cache_mib=args.prediction_cache_mib,
                     response_cache_mib=args.response_cache_mib,

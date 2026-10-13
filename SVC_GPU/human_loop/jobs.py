@@ -14,6 +14,7 @@ from .catalog import Catalog
 from .config import PROJECT, Config, allocated_gpu
 from .snapshots import create_snapshot, file_stamp
 from .storage import Store, atomic_json, now, read_json
+from .training import selection_snapshot, validate_selection
 
 
 class Jobs:
@@ -25,10 +26,16 @@ class Jobs:
 
     def submit(self, kind: str, *, slide_id: str | None = None, model_id: str = "baseline",
                threshold: float = -1.0, budget: int = 100_000, reviewer: str = "", pass_id: str = "pass-1",
-               executor: str | None = None, slide_ids: list[str] | None = None) -> dict:
+               executor: str | None = None, slide_ids: list[str] | None = None,
+               training_samples=None, validation_samples=None, model_name="", c_values=None) -> dict:
         if not self.config.enable_compute:
             raise ValueError("GPU prediction and training are disabled in this deployment")
-        if kind == "train" and not Path(self.config.original_manifest).is_file():
+        selected = kind == "train" and (training_samples is not None or validation_samples is not None)
+        if selected:
+            training_samples, validation_samples, model_name, c_values = validate_selection(
+                self.catalog, training_samples, validation_samples, model_name, c_values)
+            executor = "slurm"
+        if kind == "train" and not selected and not Path(self.config.original_manifest).is_file():
             raise ValueError("Training requires the original split workbook; configure HISTOLOOP_ORIGINAL_MANIFEST")
         executor = executor or self.config.executor
         if executor not in ("local", "slurm"):
@@ -72,11 +79,20 @@ class Jobs:
                 "executor": executor, "directory": str(directory)}
             job["slurm_name"] = "rv_" + job_id.split("-", 1)[1]
             job["submitter_pid"] = os.getpid()
-            job["model_stamp"] = file_stamp(model["path"])
+            job["model_stamp"] = None if selected else file_stamp(model["path"])
             job["parent_metadata"] = read_json(Path(model["path"]).parent / "metadata.json", {})
+            if selected:
+                job.update(training_mode="selected_samples", training_samples=training_samples,
+                    validation_samples=validation_samples, model_name=model_name, c_values=c_values,
+                    total=len(c_values), budget=0)
             atomic_json(directory / "job.json", job)
         try:
-            if kind == "train":
+            if selected:
+                thread = threading.Thread(target=self._prepare_selection, args=(dict(job),), daemon=True, name=f"launch-{job_id}")
+                self._threads[job_id] = thread
+                thread.start()
+                return job
+            elif kind == "train":
                 snapshot = create_snapshot(self.catalog, self.store, directory / "snapshot")
                 job["corrected_tiles"] = snapshot["corrected_tiles"]
                 job["snapshot_path"] = str(directory / "snapshot/snapshot.json")
@@ -96,6 +112,21 @@ class Jobs:
             job.update(status="failed", error=str(error), finished_at=now())
             atomic_json(directory / "job.json", job)
             raise
+
+    def _prepare_selection(self, job):
+        directory = Path(job["directory"])
+        try:
+            snapshot = selection_snapshot(self.catalog, self.store, directory / "snapshot", job)
+            job.update(snapshot_path=str(directory / "snapshot/snapshot.json"),
+                training_tiles=sum(row["tiles"] for row in snapshot["slides"] if row["split"] == "training"),
+                validation_tiles=sum(row["tiles"] for row in snapshot["slides"] if row["split"] == "validation"))
+            atomic_json(directory / "request.json", {"config": {**self.config.dict(), "executor": "slurm"}, "job": job})
+            job["status"] = "submitting"
+            self._publish_launch(job)
+            self._launch(job)
+        except Exception as error:
+            job.update(status="failed", error=str(error), finished_at=now())
+            self._publish_launch(job)
 
     def _recover_id(self, job: dict) -> str | None:
         name = job.get("slurm_name")
