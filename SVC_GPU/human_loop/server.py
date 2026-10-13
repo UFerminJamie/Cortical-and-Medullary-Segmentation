@@ -10,6 +10,7 @@ import logging
 import resource
 import secrets
 import socket
+import threading
 import time
 import os
 from dataclasses import replace
@@ -51,6 +52,8 @@ def create_app(config: Config | None = None, token: str | None = None) -> FastAP
             raise ValueError(f"{name} must be positive")
     store, pool = Store(config.state_dir), WsiPool(config.wsi_handles, config.jpeg_cache_mib * 1024**2)
     responses = BoundedCache(16, config.response_cache_mib * 1024**2)
+    training_images = BoundedCache(256, min(16, config.response_cache_mib) * 1024**2)
+    training_image_locks = tuple(threading.Lock() for _ in range(64))
     timings = RequestMetrics()
     catalog = Catalog(config, store)
     annotation_files = AnnotationFiles(config, catalog)
@@ -75,6 +78,7 @@ def create_app(config: Config | None = None, token: str | None = None) -> FastAP
             pool.close()
             catalog.read_cache.close()
             responses.clear()
+            training_images.clear()
             limiter.total_tokens = previous
 
     app = FastAPI(title="HistoLoop", lifespan=lifespan, docs_url=None, redoc_url=None)
@@ -480,8 +484,8 @@ def create_app(config: Config | None = None, token: str | None = None) -> FastAP
             c_values=payload.get("c_values"))
 
     @app.get("/api/training/samples")
-    def training_samples():
-        rows = catalog.listing("pass-1")
+    def training_samples(pass_id: str = "pass-1"):
+        rows = catalog.listing(pass_id)
         for row in rows:
             row["revision"] = row.get("revision", 0)
             # Only corrected slides need tile reads to adjust the cheap prediction summary.
@@ -493,15 +497,29 @@ def create_app(config: Config | None = None, token: str | None = None) -> FastAP
         return rows
 
     @app.get("/api/training/samples/{slide_id}/thumbnail")
-    def training_image(slide_id: str, prediction_id: str, revision: int = 0):
+    def training_image(request: Request, slide_id: str, prediction_id: str, revision: int = 0):
         slide = catalog.slide(slide_id)
-        data, human, labels, _ = selected_labels(catalog, store, {"id": slide_id, "prediction_id": prediction_id, "revision": revision})
-        key = "training:" + signature(slide["wsi_path"], slide["pt_path"], slide["baseline_csv"]) + str((slide_id, prediction_id, revision))
-        cached = responses.get(key)
-        if cached is None:
-            cached = training_thumbnail(pool, slide, data, human, labels)
-            responses.put(key, cached, len(cached))
-        return Response(cached, media_type="image/jpeg", headers={"Cache-Control": "private, no-cache"})
+        if store.summary().get(slide_id, {}).get("revision", 0) != revision:
+            raise Conflict("Corrections changed; refresh the sample picker")
+        version = next((v for v in catalog.prediction_versions(slide_id) if v["job_id"] == prediction_id), None)
+        if version is None:
+            raise ValueError("Unknown saved prediction; refresh the sample picker")
+        sources = [slide["wsi_path"], slide["pt_path"], slide["baseline_csv"]]
+        if version.get("path"):
+            sources.append(version["path"])
+        key = signature(*sources) + str((slide_id, prediction_id, revision, version["threshold"]))
+        etag = '"' + hashlib.sha256(key.encode()).hexdigest() + '"'
+        headers = {"Cache-Control": "private, no-cache", "ETag": etag}
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        # Returning to a cached thumbnail does not reread tile matrices or corrections.
+        with training_image_locks[int(etag[1:9], 16) % len(training_image_locks)]:
+            cached = training_images.get(key)
+            if cached is None:
+                data, human, labels, _ = selected_labels(catalog, store, {"id": slide_id, "prediction_id": prediction_id, "revision": revision})
+                cached = training_thumbnail(pool, slide, data, human, labels)
+                training_images.put(key, cached, len(cached))
+        return Response(cached, media_type="image/jpeg", headers=headers)
 
     @app.get("/api/jobs")
     def job_list():

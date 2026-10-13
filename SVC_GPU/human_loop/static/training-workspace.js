@@ -1,17 +1,22 @@
 "use strict";
 const trainingWorkspace={samples:[],train:new Map(),validation:new Map(),filtered:[],loading:false,submitting:false,
+  cards:new Map(),thumbnailQueue:new Map(),thumbnailActive:0,maxCards:96,thumbnailConcurrency:4,
   async open(){
     $('trainDialog').showModal();
     this.results();
-    if(!this.samples.length)await this.refresh();else this.filter();
+    await this.refresh();
     this.mode();
   },
   async refresh(){
     if(this.loading)return;this.loading=true;$('trainingPickerStatus').textContent='Loading samples and correction summaries…';
-    try{this.samples=await api('/api/training/samples');
+    this.counts();
+    try{this.samples=await api('/api/training/samples?'+new URLSearchParams({pass_id:S.pass}));
       for(const group of [this.train,this.validation])for(const [id] of group){const sample=this.samples.find(s=>s.id===id);if(sample?.prediction_available)group.set(id,sample);else group.delete(id);}
       const choices=new Map(this.samples.map(s=>[s.dataset_id+':'+s.cohort,(s.dataset_name||s.dataset_id)+' / '+s.cohort]));
+      const cohort=$('trainingCohort').value;
       $('trainingCohort').replaceChildren(node('option',{value:'',text:'All cohorts'}),...Array.from(choices).sort((a,b)=>a[1].localeCompare(b[1])).map(([value,text])=>node('option',{value,text})));
+      $('trainingCohort').value=choices.has(cohort)?cohort:'';
+      for(const card of this.cards.values())if(card.status==='error')card.status='idle';
       this.filter();
     }catch(e){toast(e.message,true);$('trainingPickerStatus').textContent=e.message;}
     finally{this.loading=false;this.counts();}
@@ -20,8 +25,11 @@ const trainingWorkspace={samples:[],train:new Map(),validation:new Map(),filtere
     $('submitTraining').hidden=!legacy;$('submitSelectedTraining').hidden=legacy;
     if(legacy)updateTrainPlan();else this.counts();
   },
-  filter(){const search=$('trainingSearch').value.toLowerCase(),cohort=$('trainingCohort').value,split=$('trainingSplit').value;
-    this.filtered=this.samples.filter(s=>(!search||s.name.toLowerCase().includes(search))&&(!cohort||s.dataset_id+':'+s.cohort===cohort)&&(!split||s.original_split===split));
+  filter(){const search=$('trainingSearch').value.toLowerCase(),cohort=$('trainingCohort').value,split=$('trainingSplit').value,state=$('trainingState').value;
+    this.filtered=this.samples.filter(s=>{const corrected=!!(s.manual_tiles||s.excluded_tiles);
+      return (!search||s.name.toLowerCase().includes(search))&&(!cohort||s.dataset_id+':'+s.cohort===cohort)&&(!split||s.original_split===split)&&
+        (!state||(state==='reviewed'&&s.reviewed)||(state==='remaining'&&!s.reviewed)||(state==='corrected'&&corrected)||
+         (state==='untouched'&&!corrected)||(state==='excluded'&&s.excluded_tiles>0));});
     const key=$('trainingSort').value,direction=$('trainingSortDirection').value==='desc'?-1:1;
     this.filtered.sort((a,b)=>{let delta;
       if(key==='medulla_fraction'){if(a[key]==null||b[key]==null)return a[key]==null?(b[key]==null?a.name.localeCompare(b.name):1):-1;delta=a[key]-b[key];}
@@ -36,33 +44,78 @@ const trainingWorkspace={samples:[],train:new Map(),validation:new Map(),filtere
   },
   counts(){
     $('trainingSelectionCounts').textContent=this.train.size+' training samples · '+this.validation.size+' validation samples';
-    if(!this.loading)$('trainingPickerStatus').textContent=this.filtered.length+' samples shown · Medullary % uses predictions with human corrections; excluded tiles omitted.';
+    if(!this.loading)$('trainingPickerStatus').textContent=this.filtered.length+' samples shown · Reviewed in '+(S.passes.find(p=>p.id===S.pass)?.name||S.pass)+' · Labels = predictions with human corrections applied; excluded tiles omitted.';
     const active=S.jobs.some(j=>j.kind==='train'&&['preparing','submitting','pending','running','submitted','unknown'].includes(j.status));
     $('submitSelectedTraining').disabled=this.loading||this.submitting||S.computeEnabled===false||!this.train.size||!this.validation.size||active;
   },
+  card(sample){
+    const key=sample.id+':'+sample.prediction_id+':'+sample.revision;
+    let card=this.cards.get(key);
+    if(card){this.cards.delete(key);this.cards.set(key,card);return card;}
+    const element=node('article',{class:'training-sample-card','data-sample-id':sample.id});
+    const image=node('img',{alt:'WSI with corrected predictions for '+sample.name,width:480,height:300,decoding:'async'});
+    const status=node('span',{class:'training-thumbnail-status',text:sample.prediction_available?'Loading WSI…':'No saved prediction'});
+    const thumbnail=node('div',{class:'training-thumbnail'},[image,status]);
+    const checks=node('div',{class:'training-sample-checks'}),inputs={};
+    card={key,element,image,message:status,inputs,status:'idle',url:null,
+      source:'/api/training/samples/'+sample.id+'/thumbnail?'+new URLSearchParams({prediction_id:sample.prediction_id,revision:sample.revision})};
+    for(const role of ['training','validation']){
+      const input=node('input',{type:'checkbox','aria-label':sample.name+' '+role,onchange:e=>this.select(card.sample,role,e.target.checked)});
+      inputs[role]=input;checks.append(node('label',{},[input,role==='training'?'Training':'Validation']));
+    }
+    card.meta=node('small');card.state=node('small',{class:'training-sample-state'});
+    element.append(thumbnail,node('strong',{text:sample.name,title:sample.name}),
+      node('small',{text:(sample.dataset_name||sample.dataset_id)+' / '+sample.cohort+' · '+sample.original_split}),card.meta,card.state,checks);
+    this.cards.set(key,card);return card;
+  },
+  pumpThumbnails(){
+    while(this.thumbnailActive<this.thumbnailConcurrency&&this.thumbnailQueue.size){
+      const [key,card]=this.thumbnailQueue.entries().next().value;this.thumbnailQueue.delete(key);
+      if(card.status!=='idle'||this.cards.get(key)!==card)continue;
+      card.status='loading';card.message.hidden=false;card.message.textContent='Loading WSI…';this.thumbnailActive++;
+      fetch(card.source,{credentials:'same-origin'}).then(async response=>{
+        if(!response.ok)throw new Error('Thumbnail unavailable');
+        const blob=await response.blob();
+        if(this.cards.get(key)!==card)return;
+        card.url=URL.createObjectURL(blob);card.image.src=card.url;
+        await card.image.decode();
+        if(this.cards.get(key)!==card)return;
+        card.status='ready';card.message.hidden=true;
+      }).catch(()=>{
+        if(this.cards.get(key)!==card)return;
+        if(card.url){URL.revokeObjectURL(card.url);card.url=null;card.image.removeAttribute('src');}
+        card.status='error';card.message.hidden=false;card.message.textContent='Thumbnail unavailable · refresh samples to retry';
+      }).finally(()=>{this.thumbnailActive--;this.pumpThumbnails();});
+    }
+  },
   render(){
-    const viewport=$('trainingSampleViewport'),columns=Number($('trainingColumns').value),height=286,
+    const viewport=$('trainingSampleViewport'),columns=Number($('trainingColumns').value),height=320,
       count=Math.ceil(this.filtered.length/columns),first=Math.max(0,Math.floor(viewport.scrollTop/height)-2),last=Math.min(count,Math.ceil((viewport.scrollTop+(viewport.clientHeight||500))/height)+2);
-    const content=$('trainingSampleGrid');content.style.gridTemplateColumns='repeat('+columns+',minmax(0,1fr))';
+    const content=$('trainingSampleGrid');content.style.gridTemplateColumns='repeat('+columns+',minmax(0,1fr))';content.style.height=count*height+'px';
     content.style.paddingTop=first*height+'px';content.style.paddingBottom=Math.max(0,count-last)*height+'px';
     const cards=[];
-    for(const sample of this.filtered.slice(first*columns,last*columns)){
-      const card=node('article',{class:'training-sample-card'+(!sample.prediction_available?' unavailable':'')});
-      const image=node('img',{alt:'WSI, predictions, and human corrections for '+sample.name,loading:'lazy',width:480,height:300});
-      if(sample.prediction_available)image.src='/api/training/samples/'+sample.id+'/thumbnail?'+new URLSearchParams({prediction_id:sample.prediction_id,revision:sample.revision});
-      image.onerror=()=>{image.alt='Thumbnail unavailable; refresh samples if corrections changed.';};
-      const checks=node('div',{class:'training-sample-checks'});
+    for(const [offset,sample] of this.filtered.slice(first*columns,last*columns).entries()){
+      const card=this.card(sample);card.sample=sample;card.index=first*columns+offset;
+      card.element.classList.toggle('unavailable',!sample.prediction_available);
       for(const [role,group,other] of [['training',this.train,this.validation],['validation',this.validation,this.train]]){
-        const input=node('input',{type:'checkbox','aria-label':sample.name+' '+role,onchange:e=>this.select(sample,role,e.target.checked)});
+        const input=card.inputs[role];
         input.checked=group.has(sample.id);input.disabled=!sample.prediction_available||other.has(sample.id)||this.submitting;
-        checks.append(node('label',{},[input,role==='training'?'Training':'Validation']));
       }
-      card.append(image,node('strong',{text:sample.name,title:sample.name}),node('small',{text:(sample.dataset_name||sample.dataset_id)+' / '+sample.cohort+' · '+sample.original_split}),
-        node('small',{text:'Medullary '+(sample.medulla_fraction==null?'—':(100*sample.medulla_fraction).toFixed(1)+'%')+' · '+fmt(sample.manual_tiles)+' corrected tiles'}),checks);
-      if(!sample.prediction_available)card.append(node('small',{text:sample.selection_error||'Run a prediction before selecting this sample.'}));
+      card.meta.textContent='Medullary '+(sample.medulla_fraction==null?'—':(100*sample.medulla_fraction).toFixed(1)+'%')+' · '+fmt(sample.manual_tiles)+' corrected tiles';
+      card.state.textContent=(sample.reviewed?'Reviewed':'Not reviewed')+((sample.manual_tiles||sample.excluded_tiles)?' · Corrected':' · Predictions unchanged')+(sample.excluded_tiles?' · '+fmt(sample.excluded_tiles)+' excluded':'');
+      if(!sample.prediction_available)card.message.textContent=sample.selection_error||'Run a prediction before selecting this sample.';
       cards.push(card);
     }
-    content.replaceChildren(...cards);
+    // Move only changed cards; overlapping visible images never detach on scroll.
+    const wanted=new Set(cards.map(c=>c.element));let cursor=content.firstElementChild;
+    for(const card of cards){if(card.element===cursor)cursor=cursor.nextElementSibling;else content.insertBefore(card.element,cursor);}
+    for(const element of Array.from(content.children))if(!wanted.has(element))element.remove();
+    const center=(viewport.scrollTop+(viewport.clientHeight||500)/2)/height*columns;
+    this.thumbnailQueue=new Map(cards.filter(c=>c.sample.prediction_available&&c.status==='idle')
+      .sort((a,b)=>Math.abs(a.index-center)-Math.abs(b.index-center)).map(c=>[c.key,c]));
+    for(const [key,card] of this.cards){if(this.cards.size<=this.maxCards)break;if(wanted.has(card.element))continue;
+      this.cards.delete(key);this.thumbnailQueue.delete(key);if(card.url)URL.revokeObjectURL(card.url);card.image.removeAttribute('src');}
+    this.pumpThumbnails();
   },
   async submit(){
     if(this.submitting)return;
@@ -115,11 +168,13 @@ const trainingWorkspace={samples:[],train:new Map(),validation:new Map(),filtere
   },
   setup(){
     $('trainingMode').onchange=()=>this.mode();
-    for(const id of ['trainingCohort','trainingSplit','trainingSort','trainingSortDirection','trainingColumns'])$(id).onchange=()=>this.filter();
+    for(const id of ['trainingCohort','trainingSplit','trainingState','trainingSort','trainingSortDirection','trainingColumns'])$(id).onchange=()=>this.filter();
     $('trainingSearch').oninput=()=>this.filter();
     $('refreshTrainingSamples').onclick=()=>this.refresh();
     $('clearTrainingSamples').onclick=()=>{this.train.clear();this.validation.clear();this.render();this.counts();};
     $('trainingSampleViewport').onscroll=()=>{if(!this.frame){this.frame=true;requestAnimationFrame(()=>{this.frame=false;this.render();});}};
+    $('trainDialog').addEventListener('close',()=>this.thumbnailQueue.clear());
+    window.addEventListener('pagehide',event=>{if(event.persisted)return;this.thumbnailQueue.clear();for(const card of this.cards.values())if(card.url)URL.revokeObjectURL(card.url);});
     $('submitSelectedTraining').onclick=()=>this.submit();
     $('refreshTrainingResults').onclick=async()=>{try{const boot=await api('/api/bootstrap');S.models=boot.models;fillModels();this.results();}catch(e){toast(e.message,true);}};
     $('trainingResultsButton').onclick=()=>{$('trainingResultsPanel').hidden=false;this.results();$('trainingResultsPanel').scrollIntoView({block:'start',behavior:'smooth'});};

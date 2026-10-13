@@ -97,6 +97,59 @@ def test_picker_and_thumbnail_include_combined_labels(setup):
     assert client.get(f"/api/training/samples/{sample['id']}/thumbnail?prediction_id=baseline&revision=0").status_code == 409
 
 
+def test_training_and_validation_use_corrected_prediction_union(setup, tmp_path):
+    _, app, client, slides = setup
+    correction(client, slides['A']['id'], label=1).raise_for_status()
+    correction(client, slides['B']['id'], label=0, polygon=[[0,256],[256,256],[256,512],[0,512]]).raise_for_status()
+    correction(client, slides['B']['id'], label=-2, polygon=[[256,256],[512,256],[512,512],[256,512]]).raise_for_status()
+    body = payload(slides)
+    body['training_samples'] = [selection(slides['A'], 1)]
+    body['validation_samples'] = [selection(slides['B'], 2)]
+    frozen = selection_snapshot(app.state.catalog, app.state.store, tmp_path / 'union', body)
+    expected = {'training': ([0,1,2,3], [1,0,1,1], [True,False,False,False]),
+        'validation': ([0,1,2], [0,0,0], [False,False,True])}
+    from SVC_GPU.human_loop.worker import load_selected_sample
+    for row in frozen['slides']:
+        ids, labels, human = expected[row['split']]
+        with np.load(row['labels_path']) as saved:
+            assert saved['tile_ids'].tolist() == ids
+            assert len(np.unique(saved['tile_ids'])) == len(ids)
+            assert saved['labels'].tolist() == labels
+            assert saved['human_override'].tolist() == human
+        features, actual, provenance = load_selected_sample(row)
+        assert len(features) == len(ids) and actual.tolist() == labels
+        assert provenance.human_override.tolist() == human
+
+
+def test_thumbnail_cache_and_conditional_requests_avoid_tile_reload(setup, monkeypatch):
+    _, app, client, slides = setup
+    sid = slides['A']['id']
+    url = f'/api/training/samples/{sid}/thumbnail?prediction_id=baseline&revision=0'
+    first = client.get(url)
+    assert first.status_code == 200
+    def unexpected(*args, **kwargs):
+        raise AssertionError('Cached thumbnails must not load tile data')
+    monkeypatch.setattr('SVC_GPU.human_loop.server.selected_labels', unexpected)
+    again = client.get(url)
+    assert again.content == first.content and again.headers['etag'] == first.headers['etag']
+    assert client.get(url, headers={'If-None-Match': first.headers['etag']}).status_code == 304
+    correction(client, sid, label=1).raise_for_status()
+    # Cached bytes and validators must not bypass correction revision checks.
+    assert client.get(url).status_code == 409
+    assert client.get(url, headers={'If-None-Match': first.headers['etag']}).status_code == 409
+
+
+def test_picker_review_state_uses_requested_pass(setup):
+    _, _, client, slides = setup
+    sid = slides['A']['id']
+    client.post(f'/api/slides/{sid}/review', json={'revision': 0, 'reviewer': 'Test', 'pass_id': 'pass-1'}).raise_for_status()
+    other = client.post('/api/passes', json={'name': 'Second pass'}).json()['id']
+    row = lambda pass_id: next(s for s in client.get('/api/training/samples', params={'pass_id': pass_id}).json() if s['id'] == sid)
+    assert row('pass-1')['reviewed'] and not row(other)['reviewed']
+    correction(client, sid, label=1).raise_for_status()
+    assert not row('pass-1')['reviewed'] and row('pass-1')['manual_tiles'] == 1
+
+
 def test_picker_summary_cache_tracks_corrections_and_prediction_sources(setup, monkeypatch):
     _, app, client, slides = setup
     sid = slides['A']['id']

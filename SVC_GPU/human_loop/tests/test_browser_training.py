@@ -83,3 +83,88 @@ def test_training_workspace_and_viewer_controls(setup, monkeypatch):
             browser.close()
     finally:
         server.should_exit = True;thread.join(timeout=5)
+
+
+def test_picker_state_filters_and_stable_thumbnails_on_large_scroll(setup):
+    import asyncio
+    from collections import Counter
+    from fastapi.responses import Response
+
+    playwright = pytest.importorskip('playwright.sync_api').sync_playwright
+    _, app, client, slides = setup
+    sid = slides['A']['id']
+    jpeg = client.get(f'/api/training/samples/{sid}/thumbnail?prediction_id=baseline&revision=0').content
+    base = client.get('/api/training/samples').json()[0]
+    samples = [{**base, 'id': f'picker-{i:04}', 'name': f'Sample {i:04}', 'revision': 0,
+        'reviewed': i % 5 == 0, 'manual_tiles': int(i % 3 == 0), 'excluded_tiles': int(i % 7 == 0),
+        'medulla_fraction': (i % 100) / 100} for i in range(1865)]
+
+    @app.get('/api/picker-test-image')
+    async def delayed_image():
+        await asyncio.sleep(.04)
+        return Response(jpeg, media_type='image/jpeg')
+
+    sock = socket.socket();sock.bind(('127.0.0.1', 0));port = sock.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, log_level='error'))
+    thread = threading.Thread(target=server.run, kwargs={'sockets': [sock]}, daemon=True);thread.start()
+    try:
+        with playwright() as manager:
+            executable = os.environ.get('HISTOLOOP_BROWSER', manager.chromium.executable_path)
+            if not Path(executable).is_file():pytest.skip('Set HISTOLOOP_BROWSER to Chromium')
+            browser = manager.chromium.launch(headless=True, executable_path=executable, args=['--no-sandbox'])
+            page = browser.new_page(viewport={'width': 1600, 'height': 1000})
+            errors = [];page.on('pageerror', lambda error: errors.append(str(error)))
+            requests = []
+            page.route('**/api/training/samples?*', lambda route: route.fulfill(json=samples))
+            def thumbnail(route):
+                requests.append(route.request.url)
+                route.fulfill(response=route.fetch(url=f'http://127.0.0.1:{port}/api/picker-test-image'))
+            page.route('**/api/training/samples/*/thumbnail?*', thumbnail)
+            page.goto(f'http://127.0.0.1:{port}/?token=test-access')
+            page.wait_for_function('S.detail&&!S.loading')
+            page.evaluate('window.pickerPeak=0;window.pickerMonitor=setInterval(()=>pickerPeak=Math.max(pickerPeak,trainingWorkspace.thumbnailActive),10)')
+            page.locator('#trainButton').click()
+            page.wait_for_function('trainingWorkspace.samples.length===1865&&!trainingWorkspace.loading')
+            loaded = "trainingWorkspace.thumbnailActive===0&&trainingWorkspace.thumbnailQueue.size===0&&Array.from(document.querySelectorAll('#trainingSampleGrid img')).every(i=>i.complete&&i.naturalWidth>0)"
+            page.wait_for_function(loaded)
+            page.get_by_role('checkbox', name='Sample 0000 training', exact=True).check()
+            page.get_by_role('checkbox', name='Sample 0001 validation', exact=True).check()
+            for state in ['reviewed', 'remaining', 'corrected', 'untouched', 'excluded']:
+                page.locator('#trainingState').select_option(state)
+                expected = sum({'reviewed': s['reviewed'], 'remaining': not s['reviewed'],
+                    'corrected': bool(s['manual_tiles'] or s['excluded_tiles']),
+                    'untouched': not (s['manual_tiles'] or s['excluded_tiles']),
+                    'excluded': s['excluded_tiles'] > 0}[state] for s in samples)
+                assert page.evaluate('trainingWorkspace.filtered.length') == expected
+                assert page.locator('#trainingSelectionCounts').inner_text() == '1 training samples · 1 validation samples'
+            page.locator('#trainingState').select_option('')
+            page.wait_for_function(loaded)
+            page.evaluate("window.firstPickerImage=document.querySelector('[data-sample-id=picker-0000] img')")
+            before = Counter(requests)
+            page.evaluate("$('trainingSampleViewport').scrollTop=20")
+            page.wait_for_timeout(80)
+            assert page.evaluate("firstPickerImage===document.querySelector('[data-sample-id=picker-0000] img')&&firstPickerImage.naturalWidth>0")
+            assert Counter(requests) == before
+            page.evaluate("$('trainingSampleViewport').scrollTop=320*15")
+            page.wait_for_function("$('trainingSampleGrid').style.paddingTop!=='0px'")
+            page.wait_for_function(loaded)
+            page.evaluate("$('trainingSampleViewport').scrollTop=0")
+            page.wait_for_function("$('trainingSampleGrid').style.paddingTop==='0px'")
+            page.wait_for_function(loaded)
+            assert page.evaluate("firstPickerImage===document.querySelector('[data-sample-id=picker-0000] img')&&firstPickerImage.naturalWidth>0")
+            assert Counter(requests)[f'http://127.0.0.1:{port}/api/training/samples/picker-0000/thumbnail?prediction_id=baseline&revision=0'] == 1
+            # Move faster than the image service can respond, then settle at the bottom.
+            page.evaluate("async()=>{for(let row=30;row<=600;row+=30){$('trainingSampleViewport').scrollTop=row*320;await new Promise(resolve=>requestAnimationFrame(resolve));}}")
+            page.wait_for_function(loaded)
+            assert page.evaluate('trainingWorkspace.cards.size') <= 96
+            assert page.locator('#trainingSampleGrid article').count() <= 30
+            assert page.evaluate('pickerPeak') == 4
+            assert page.evaluate("$('trainingSampleViewport').scrollHeight") == ((len(samples) + 2) // 3) * 320
+            for columns in ['2', '5', '3']:
+                page.locator('#trainingColumns').select_option(columns)
+                page.wait_for_function(loaded)
+                assert page.evaluate("$('trainingSampleViewport').scrollHeight") == ((len(samples) + int(columns) - 1) // int(columns)) * 320
+            assert not errors, errors
+            browser.close()
+    finally:
+        server.should_exit = True;thread.join(timeout=5)

@@ -37,12 +37,30 @@ the WSI under all saved prediction tiles and resolved human corrections: blue co
 red medulla, grey excluded, pale outlines for corrected tiles. Samples lacking saved
 predictions cannot be selected; run a prediction for them first.
 
+The **State** filter includes Reviewed, Not reviewed, Corrected/excluded, Predictions
+unchanged, and Has excluded tiles. Reviewed status follows the active review pass;
+correction status reflects the resolved tile labels across passes. State, cohort,
+split, and search filters combine, and filtering never removes selected samples.
+Reopening the workspace refreshes sample states while retaining those selections.
+
+Scrolling reuses existing cards and decoded thumbnails instead of recreating images
+on every update. At most four thumbnails load concurrently, visible samples take
+priority, and up to 96 cards remain in a bounded cache for return scrolling. Only
+the visible rows and nearby rows occupy the DOM. Thumbnail responses also use a
+separate server cache and conditional HTTP validators, checked against correction
+revisions and prediction/feature sources.
+
 Medullary percentage uses the current saved predictions plus human corrections,
 excluding omitted tiles. Per-sample percentages are cached by correction revision
 and prediction/feature file stamps, so unchanged samples need no tile reload when
 reopening the picker. Refreshing samples updates prediction versions and correction
 revisions for retained selections. If a correction changes after selection, preparation
 fails with a refresh message instead of silently training with different labels.
+
+Training and validation both use the same corrected-prediction map as thumbnails:
+one label per native tile, with human corrections replacing predictions wherever
+present. Uncorrected prediction tiles remain included. Corrected tiles are never
+duplicated alongside their former prediction labels, and excluded tiles are omitted.
 
 **Submit GPU training** freezes labels in the background, then submits `sbatch`.
 Check **GPU Jobs** for preparation, Slurm ID, candidate progress, and errors.
