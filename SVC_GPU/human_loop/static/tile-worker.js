@@ -1,5 +1,5 @@
 "use strict";
-importScripts('/static/prediction-field.js?v=1');
+importScripts('/static/prediction-field.js?v=2');
 let data, detail, grid;
 let fieldCache=null,tissue=null,tissueRevision='',guide=null,lastSentField=null;
 const color = label => label===-2?"#aab2b9":label===0?"#529cff":"#f18582";

@@ -76,6 +76,8 @@ def partition_holdout(train_rows: list[dict], test_rows: list[dict], corrected: 
 
 
 def train(config: Config, store: Store, catalog: Catalog, job: dict) -> dict:
+    if job.get("training_mode") == "selected_samples":
+        return train_selected(config, store, job)
     snapshot = read_json(Path(job["snapshot_path"]))
     if job.get("model_stamp"):
         verify_stamp(job["model_stamp"])
@@ -240,6 +242,129 @@ def train(config: Config, store: Store, catalog: Catalog, job: dict) -> dict:
         atomic_json(store.root / "models" / f"{job['id']}.json", version)
     return {"model_id": job["id"], "model_path": str(model_path), "training_tiles": metadata["training_tiles"],
             "heldout_samples": len(retained), "excluded_heldout_samples": len(excluded)}
+
+
+def load_selected_sample(row):
+    verify_stamp(row["feature_stamp"])
+    path = Path(row["labels_path"])
+    if hashlib.sha256(path.read_bytes()).hexdigest() != row["labels_sha256"]:
+        raise ValueError("Frozen training labels changed")
+    sample = load_sample_features(row["pt_path"])
+    verify_stamp(row["feature_stamp"])
+    with np.load(path, allow_pickle=False) as saved:
+        ids, labels = saved["tile_ids"].copy(), saved["labels"].copy()
+        if not np.array_equal(sample.coordinates[ids], saved["coordinates"]):
+            raise ValueError(f"Frozen coordinates differ from features: {row['name']}")
+        provenance = pd.DataFrame({"slide_id": row["id"], "sample_name": row["name"],
+            "split": row["split"], "tile_id": ids, "x": saved["coordinates"][:, 0],
+            "y": saved["coordinates"][:, 1], "label_encoded": labels,
+            "human_override": saved["human_override"], "source_event_id": saved["source_event_ids"],
+            "prediction_id": row["prediction_id"], "feature_path": row["pt_path"]})
+    return sample.features[torch.from_numpy(ids)], torch.from_numpy(labels.astype(np.int64)), provenance
+
+
+def train_selected(config, store, job):
+    """Fit every C on training samples and evaluate only on frozen validation labels."""
+    import gc
+
+    snapshot = read_json(Path(job["snapshot_path"]))
+    rows = snapshot["slides"]
+    training = [row for row in rows if row["split"] == "training"]
+    validation = [row for row in rows if row["split"] == "validation"]
+    if not training or not validation or {r["id"] for r in training} & {r["id"] for r in validation}:
+        raise ValueError("Frozen training and validation sets must be nonempty and disjoint")
+    output = Path(job["directory"]) / "artifacts"
+    output.mkdir(parents=True, exist_ok=True)
+    atomic_json(output / "sample_membership.json", snapshot)
+    # Check estimated fit memory before materializing dense matrices.
+    probe = torch.load(training[0]["pt_path"], map_location="cpu", weights_only=False, mmap=True)
+    dim = int(probe["features"].shape[1])
+    del probe
+    cp, *_ = require_gpu()
+    free, _ = cp.cuda.runtime.memGetInfo()
+    count = sum(row["tiles"] for row in training)
+    estimate = count * dim * 4 * 4 + 4096 * 1024**2
+    if estimate > free * .85:
+        raise ValueError(f"All selected training tiles need approximately {estimate / 1024**3:.1f} GiB GPU memory; "
+            f"{free / 1024**3:.1f} GiB is free. Select fewer samples or configure a larger GPU.")
+    features, labels, provenance = [], [], []
+    for row in training:
+        x_row, y_row, frame = load_selected_sample(row)
+        if x_row.shape[1] != dim:
+            raise ValueError("Selected samples use different embedding dimensions")
+        features.append(x_row); labels.append(y_row); provenance.append(frame)
+    x, y = torch.cat(features), torch.cat(labels)
+    del features, labels, x_row, y_row
+    if set(torch.unique(y).tolist()) != {0, 1}:
+        raise ValueError("Selected training tiles must contain cortex and medulla")
+    pd.concat(provenance, ignore_index=True).to_csv(output / "training_tile_provenance.csv", index=False)
+    del provenance
+    components = min(int(job.get("parent_metadata", {}).get("n_components", dim)), min(x.shape))
+    candidates = []
+    for index, c_value in enumerate(job["c_values"]):
+        candidate_id = f"{job['id']}-c{index + 1}"
+        directory = output / candidate_id
+        directory.mkdir(parents=True, exist_ok=True)
+        bundle = None
+        try:
+            print(f"Candidate {index + 1}/{len(job['c_values'])}: C={c_value}, {len(y):,} training tiles", flush=True)
+            bundle = train_gpu_pipeline(x, y, n_components=components, c_value=c_value, cache_size_mb=4096)
+            truth, predicted, scores, val_provenance = [], [], [], []
+            for row in validation:
+                vx, vy, frame = load_selected_sample(row)
+                if vx.shape[1] != dim:
+                    raise ValueError("Validation and training embedding dimensions differ")
+                pred, score = predict_gpu(bundle, vx, batch_size=32768, threshold=job["threshold"])
+                truth.append(vy.numpy()); predicted.append(pred); scores.append(score)
+                val_provenance.append(frame)
+                del vx, vy
+            metrics = classification_metrics(np.concatenate(truth), np.concatenate(predicted), np.concatenate(scores))
+            metrics["auroc"] = metrics["per_class"]["medullary"]["auc"]
+            for values in metrics["per_class"].values():
+                values["auroc"] = values["auc"]
+                values["balanced_accuracy"] = ((values["sensitivity"] + values["specificity"]) / 2
+                    if values["sensitivity"] is not None and values["specificity"] is not None else None)
+            metrics.update(samples=len(validation), tiles=sum(row["tiles"] for row in validation), threshold=job["threshold"])
+            metadata = {**base_metadata(), "model_type": "cuml StandardScaler -> PCA -> RBF SVC",
+                "training_mode": "selected_samples", "feature_dimension": dim, "n_components": components,
+                "C": c_value, "kernel": "rbf", "gamma": "scale", "class_weight": "balanced",
+                "decision_threshold": job["threshold"], "snapshot_path": job["snapshot_path"],
+                "sample_membership_path": str(output / "sample_membership.json"),
+                "training_samples": training, "validation_samples": validation,
+                "training_tiles": len(y), "validation_tiles": metrics["tiles"],
+                "class_counts_fit": {"cortical": int((y == 0).sum()), "medullary": int((y == 1).sum())},
+                "label_policy": snapshot["label_policy"], "evaluation_policy": snapshot["evaluation_policy"], "gpu": bundle["gpu"]}
+            model_path = save_bundle(bundle, directory / "svc_pipeline.pkl", metadata)
+            atomic_json(directory / "metadata.json", metadata)
+            atomic_json(directory / "validation_metrics.json", metrics)
+            save_confusion_matrix(metrics, directory / "validation_confusion_matrix.png")
+            pd.concat(val_provenance, ignore_index=True).to_csv(directory / "validation_tile_provenance.csv", index=False)
+            record = {"id": candidate_id, "name": f"{job['model_name']} · C={c_value:g}", "path": str(model_path),
+                "created_at": now(), "job_id": job["id"], "sha256": hashlib.sha256(model_path.read_bytes()).hexdigest(),
+                "metadata": metadata, "validation_metrics": metrics}
+            with store.lock():
+                atomic_json(store.root / "models" / f"{candidate_id}.json", record)
+            candidates.append({"model_id": candidate_id, "C": c_value, "status": "completed", "validation_metrics": metrics})
+        except Exception as error:
+            traceback.print_exc()
+            candidates.append({"model_id": candidate_id, "C": c_value, "status": "failed", "error": str(error)})
+        finally:
+            del bundle
+            gc.collect()
+            cp.get_default_memory_pool().free_all_blocks()
+        atomic_json(output / "search_results.json", candidates)
+        with store.lock():
+            path = Path(job["directory"]) / "job.json"
+            current = read_json(path, job)
+            current.update(candidates=candidates, completed=sum(c["status"] == "completed" for c in candidates),
+                failed=sum(c["status"] == "failed" for c in candidates))
+            atomic_json(path, current)
+    succeeded = [c for c in candidates if c["status"] == "completed"]
+    if not succeeded:
+        raise ValueError("Every SVC candidate failed; inspect the GPU job logs")
+    # Deliberately leave model choice to the reviewer.
+    return {"model_ids": [c["model_id"] for c in succeeded], "candidates": candidates,
+        "training_tiles": len(y), "completed": len(succeeded), "failed": len(candidates) - len(succeeded)}
 
 
 def predict(config: Config, store: Store, catalog: Catalog, job: dict, bundle=None) -> dict:

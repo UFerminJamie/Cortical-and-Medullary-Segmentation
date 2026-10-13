@@ -21,4 +21,9 @@ const manual=data.slice();manual[4]=0;const human=Field.create(manual,detail,opt
 assert.equal(Field.pixels(human,Field.classify(human,-10,'mean'),{...options,source:'combined',keep_manual:true}).rgba[0],82);
 assert.equal(Field.pixels(human,Field.classify(human,-10,'mean'),{...options,source:'combined',keep_manual:true}).displayed[0],0);
 assert.deepEqual(data,new Float32Array([0,0,-2,0,-1,20,0,2,1,-1,70,0,1,1,-1]));
-console.log('Prediction field: order independence, ties, threshold, uncovered/tissue gaps, manual independence passed');
+assert.deepEqual(Field.color(-2,[-2,2],{heatmap_palette:'custom',heatmap_low:'#010203',heatmap_mid:'#040506',heatmap_high:'#070809'}),[1,2,3]);
+assert.deepEqual(Field.color(2,[-2,2],{heatmap_palette:'custom',heatmap_low:'#010203',heatmap_mid:'#040506',heatmap_high:'#070809'}),[7,8,9]);
+const scoreLabels=Field.classify(f,0,'mean'),firstPixels=Field.pixels(f,scoreLabels,{...options,view:'aggregate-score'}).rgba;
+const changedPixels=Field.pixels(f,scoreLabels,{...options,view:'aggregate-score',heatmap_palette:'blue-red'}).rgba;
+assert.notDeepEqual(changedPixels,firstPixels);assert.deepEqual(Field.classify(f,0,'mean'),scoreLabels);
+console.log('Prediction field: order independence, ties, thresholds, tissue gaps, overrides and palette cache invalidation passed');

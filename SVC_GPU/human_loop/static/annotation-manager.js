@@ -7,11 +7,24 @@ const annotations={layers:[],loaded:new Map(),preferences:{},selected:null,editi
     const result=await api('/api/slides/'+slide+'/annotations',{signal});
     if(sequence!==this.sequence||S.detail?.id!==slide)return;
     this.layers=result.layers;this.generation=result.generation;this.tissues=result.tissues;this.selectedTissue=result.selected_tissue;
+    for(const layer of this.layers){const pref=this.pref(layer.id);pref.visible=false;pref.expanded=false;}
     this.render();
-    for(const layer of this.layers.filter(l=>l.present&&l.status!=='error'))await this.read(layer.id,signal);
     if(sequence===this.sequence){this.render();requestRender();}
   },
-  pref(id){const key=S.detail.id+':'+id;return this.preferences[key]||(this.preferences[key]={visible:true,color:id.includes('medull')?'#f18582':id.includes('cort')?'#529cff':'#e0cd48',opacity:.2,expanded:false,page:0,hidden:{}});},
+  pref(id){const key=S.detail.id+':'+id;return this.preferences[key]||(this.preferences[key]={visible:false,color:id.includes('medull')?'#f18582':id.includes('cort')?'#529cff':'#e0cd48',opacity:.2,expanded:false,page:0,hidden:{}});},
+  async display(id,expand=false){const pref=this.pref(id);if(expand)pref.expanded=!pref.expanded;else pref.visible=!pref.visible;
+    this.render();requestRender();schedulePreferences();
+    if((pref.visible||pref.expanded)&&!this.loaded.has(id))try{await this.read(id,S.slideController?.signal);this.render();}catch(e){if(e.name!=='AbortError'){toast(e.message,true);pref.visible=false;this.render();}}
+  },
+  async all(show){const slide=S.detail?.id;if(!slide)return;const sequence=this.sequence;
+    for(const layer of this.layers){const pref=this.pref(layer.id);pref.visible=show;pref.expanded=show;if(show)pref.hidden={};}
+    if(!show)this.selected=null;this.render();requestRender();schedulePreferences();
+    if(show)for(const layer of this.layers.filter(l=>l.present&&l.status!=='error')){
+      if(sequence!==this.sequence||slide!==S.detail?.id)return;
+      if(!this.pref(layer.id).visible)continue;
+      if(!this.loaded.has(layer.id))try{await this.read(layer.id,S.slideController?.signal);this.render();}catch(e){if(e.name!=='AbortError')toast(layer.name+': '+e.message,true);}
+    }
+  },
   async read(id,signal){
     const slide=S.detail.id,sequence=this.sequence;
     const value=await api(this.url(id),{signal});
@@ -39,9 +52,9 @@ const annotations={layers:[],loaded:new Map(),preferences:{},selected:null,editi
   },
   async refresh(){if(!S.detail)return;const slide=S.detail.id,result=await api('/api/slides/'+slide+'/annotations');if(S.detail?.id!==slide)return;
     this.layers=result.layers;this.generation=result.generation;this.tissues=result.tissues;this.selectedTissue=result.selected_tissue;
-    for(const layer of this.layers.filter(l=>l.present&&l.status!=='error'))if(!this.loaded.get(layer.id)?.dirty)await this.read(layer.id);
+    for(const layer of this.layers.filter(l=>l.present&&l.status!=='error'))if((this.loaded.has(layer.id)||this.pref(layer.id).visible||this.pref(layer.id).expanded)&&!this.loaded.get(layer.id)?.dirty)await this.read(layer.id);
     this.render();predictionTissue();requestRender();},
-  async create(id){if(!S.detail)return;try{await api(this.url(id),{method:'PUT',body:{...actorPayload(),revision:null,create:true}});await this.refresh();$('annotationTarget').value=id;}catch(e){toast(e.message,true);}},
+  async create(id){if(!S.detail)return;try{await api(this.url(id),{method:'PUT',body:{...actorPayload(),revision:null,create:true}});this.pref(id).visible=true;this.pref(id).expanded=true;await this.refresh();$('annotationTarget').value=id;this.render();}catch(e){toast(e.message,true);}},
   async downloadDraft(id){const l=this.loaded.get(id);try{const doc=await api('/api/annotation-preview',{method:'POST',body:{...actorPayload(),document:l.document,operations:l.operations}}),url=URL.createObjectURL(new Blob([JSON.stringify(doc)],{type:'application/json'})),link=node('a',{href:url,download:id});link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){toast('Draft download failed; draft is still retained: '+e.message,true);}},
   async versions(id){try{if(this.busy()){toast('Save or undo file drafts before restoring a version.');return;}const versions=await api('/api/slides/'+S.detail.id+'/annotation-versions/'+encodeURIComponent(id));$('annotationVersionList').replaceChildren(...versions.map(v=>node('button',{class:'button',text:new Date(v.time_ns/1e6).toLocaleString()+' · '+v.hash.slice(0,10),onclick:async()=>{try{await api('/api/slides/'+S.detail.id+'/annotation-versions/'+encodeURIComponent(id),{method:'POST',body:{...actorPayload(),revision:this.loaded.get(id)?.revision??null,version:v.hash}});$('annotationVersionsDialog').close();await this.refresh();}catch(e){toast(e.message,true);}}})));if(!versions.length)$('annotationVersionList').textContent='No saved backups yet.';$('annotationVersionsDialog').showModal();}catch(e){toast(e.message,true);}},
   async regenerate(){const tissue=$('tissueChoice').value||undefined;for(const layer of this.layers)if(layer.derived)layer.status='stale';this.generation={status:'pending'};this.render();try{const result=await api('/api/slides/'+S.detail.id+'/annotation-generation',{method:'POST',body:{...actorPayload(),tissue_id:tissue}});if(result.status!=='current')toast(result.error||result.status,true);await this.refresh();}catch(e){toast(e.message,true);}},
@@ -90,11 +103,11 @@ const annotations={layers:[],loaded:new Map(),preferences:{},selected:null,editi
     if($('annotationFiles').closest('[hidden]')||$('inspectorPanel').inert||!$('tab-annotate').classList.contains('active'))return;
     const rows=[];
     for(const layer of this.layers){const pref=this.pref(layer.id),l=this.loaded.get(layer.id),box=node('div',{class:'annotation-file','data-layer':layer.id}),header=node('div',{class:'annotation-file-row'});
-      header.append(node('button',{class:'square-button',text:pref.visible?'◉':'○','aria-label':'Toggle '+layer.name,'aria-pressed':String(pref.visible),onclick:()=>{pref.visible=!pref.visible;this.render();requestRender();schedulePreferences();}}),
-        node('button',{class:'text-button layer-expand',text:(pref.expanded?'▾ ':'▸ ')+layer.name,'aria-expanded':String(pref.expanded),'aria-controls':'regions-'+layer.id,onclick:()=>{pref.expanded=!pref.expanded;this.render();schedulePreferences();}}));
+      header.append(node('button',{class:'square-button',text:pref.visible?'◉':'○','aria-label':'Toggle '+layer.name,'aria-pressed':String(pref.visible),onclick:()=>this.display(layer.id)}),
+        node('button',{class:'text-button layer-expand',text:(pref.expanded?'▾ ':'▸ ')+layer.name,'aria-expanded':String(pref.expanded),'aria-controls':'regions-'+layer.id,onclick:()=>this.display(layer.id,true)}));
       const color=node('input',{type:'color',value:pref.color,'aria-label':layer.name+' color',oninput:e=>{pref.color=e.target.value;requestRender();schedulePreferences();}});
       const opacity=node('input',{type:'range',min:'0',max:'1',step:'.05',value:pref.opacity,'aria-label':layer.name+' opacity',oninput:e=>{pref.opacity=Number(e.target.value);requestRender();schedulePreferences();}});
-      box.append(header,node('div',{class:'layer-summary'},[color,opacity,node('span',{text:(l?.regions.length??layer.count)+' regions · '+(layer.derived?layer.status:l?.status||(layer.present&&layer.status!=='error'?'loading':layer.status))})]));
+      box.append(header,node('div',{class:'layer-summary'},[color,opacity,node('span',{text:(l?.regions.length??layer.count)+' regions · '+(layer.derived?layer.status:l?.status||(layer.present&&layer.status!=='error'?'not loaded':layer.status))})]));
       box.append(node('small',{text:layer.derived?'Derived · read-only; edit ground truth':layer.editable?'Working file · editable':'Tissue contour · read-only'}));
       if(!layer.present&&layer.editable)box.append(node('button',{class:'text-button',text:'Create '+layer.name,onclick:()=>this.create(layer.id)}));
       if(l?.error||layer.error)box.append(node('div',{class:'file-error',text:l?.error||layer.error}));
@@ -130,8 +143,9 @@ const annotations={layers:[],loaded:new Map(),preferences:{},selected:null,editi
   },
   setup(){
     this.vertexEditor=$('vertexEditor');
+    $('showAllAnnotations').onclick=()=>this.all(true);$('hideAllAnnotations').onclick=()=>this.all(false);
     $('fileSave').onclick=()=>this.save($('annotationTarget').value);$('fileUndo').onclick=()=>this.undo($('annotationTarget').value);$('fileRedo').onclick=()=>this.undo($('annotationTarget').value,true);$('vertexDone').onclick=()=>this.commitGeometry();
-    $('annotationTarget').onchange=()=>{if(this.editing)this.editing=null;setMode('pan');this.render();};$('regenerateAnnotations').onclick=()=>this.regenerate();
+    $('annotationTarget').onchange=async()=>{if(this.editing)this.editing=null;setMode('pan');const id=$('annotationTarget').value;if(id!=='corrections'&&!this.loaded.has(id))try{await this.read(id,S.slideController?.signal);}catch(e){toast(e.message,true);}this.render();};$('regenerateAnnotations').onclick=()=>this.regenerate();
     $('importAnnotation').onclick=()=>{if(this.busy()){toast('Save your file draft before importing.');return;}
       $('importSlide').replaceChildren(...S.slides.map(s=>node('option',{value:s.id,text:s.name})));$('importSlide').value=S.detail?.id;$('annotationImportDialog').showModal();};
     $('annotationImportForm').onsubmit=async event=>{event.preventDefault();const file=$('annotationImportFile').files[0],slide=$('importSlide').value,layer=$('importLayer').value==='custom'?$('importLayerName').value:$('importLayer').value;if(!file)return;

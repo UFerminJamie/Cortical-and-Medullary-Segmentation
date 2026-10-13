@@ -27,9 +27,12 @@ def test_annotation_files_panels_and_prediction_workflow(setup):
             page.goto(f'http://127.0.0.1:{port}/?token=test-access')
             page.wait_for_function('S.detail&&!S.loading')
             page.evaluate('(id)=>loadSlide(id)',sid)
-            page.wait_for_function('(id)=>S.detail?.id===id&&!S.loading&&annotations.loaded.has("cortical_gt.json")',arg=sid)
+            page.wait_for_function('(id)=>S.detail?.id===id&&!S.loading&&annotations.layers.length',arg=sid)
+            assert page.evaluate('annotations.loaded.size') == 0
+            page.locator('#showAllAnnotations').click()
+            page.wait_for_function('annotations.loaded.has("cortical_gt.json")')
             assert page.evaluate('annotations.layers.filter(l=>l.present).length')==5
-            page.locator('[data-layer="cortical_gt.json"] .layer-expand').click()
+            page.wait_for_function('annotations.layers.filter(l=>l.present).every(l=>annotations.loaded.has(l.id))')
             assert page.locator('[data-layer="cortical_gt.json"] .region-row').count()==1
             before=files.layer_path(sid,'cortical_gt.json').read_bytes()
             page.locator('[data-layer="cortical_gt.json"] input[type=color]').fill('#00ff66')

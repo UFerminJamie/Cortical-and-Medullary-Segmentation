@@ -5,7 +5,7 @@ class TileEngine {
     this.startWorker();
   }
   startWorker() {
-    this.worker=typeof Worker!=="undefined"?new Worker("/static/tile-worker.js?v=7"):null;
+    this.worker=typeof Worker!=="undefined"?new Worker("/static/tile-worker.js?v=8"):null;
     if(this.worker) {
       const worker=this.worker;
       this.worker.onmessage=event=>{

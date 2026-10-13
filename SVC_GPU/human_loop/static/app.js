@@ -367,6 +367,9 @@ async function loadSlide(id,preserve=false,view=null) {
     if(bytes.byteLength-offset!==detail.tiles*20)throw new Error("Prediction data is incomplete");
     S.raster?.close?.();S.raster=null;S.mask=null;S.histogramBins=null;S.history=[];S.historyNext=null;renderHistory();
     S.maskKey=null;S.detail=detail;S.viewPrediction=selection;S.data=new Float32Array(bytes,offset);S.draft=[];S.highlighted=null;S.cursor=null;
+    if(old!==id){$('overlayEnabled').checked=true;$('overlaySource').value='combined';
+      for(const key of ['cortex','medulla']){$(key+'Enabled').checked=true;$(key+'Comparison').value='all';}
+      $('keepManual').checked=true;}
     const imageRequest=(old!==id||!preserve||!S.viewer.world.getItemAt(0))?
       openSlideImage(detail,controller.signal):Promise.resolve();
     // Observe rejection immediately while the worker initializes.
@@ -516,7 +519,7 @@ function renderOverlay() {
   const size=S.detail.tile_size_level0*scale;
   canvas.style.opacity=Number($("opacity").value)/100;
   if($("overlayEnabled").checked&&S.mask) {
-    const view=$('predictionView').value,aggregate=view.startsWith('aggregate');
+    const view=$('predictionView').value,aggregate=view.startsWith('aggregate'),heatmapOptions=predictionOptions();
     const ids=candidates(-p0.x/scale,-p0.y/scale,(rect.width-p0.x)/scale,(rect.height-p0.y)/scale);
     if(aggregate&&S.raster){ctx.imageSmoothingEnabled=false;const f=S.fieldInfo;ctx.drawImage(S.raster,p0.x,p0.y,(f?.width*f?.step||S.detail.width)*scale,(f?.height*f?.step||S.detail.height)*scale);}
     ctx.save();
@@ -524,7 +527,7 @@ function renderOverlay() {
     if(!aggregate||$('tileBoundaries').checked)for(const index of ids) {
       if(!S.mask[index])continue;const off=index*5,x=p0.x+S.data[off]*scale,y=p0.y+S.data[off+1]*scale;
       if(x+size<0||y+size<0||x>rect.width||y>rect.height)continue;
-      const label=displayedLabel(index),human=displayedHuman(index),rgb=PredictionField.color(S.data[off+2],S.detail.score_range);
+      const label=displayedLabel(index),human=displayedHuman(index),rgb=PredictionField.color(S.data[off+2],S.detail.score_range,heatmapOptions);
       ctx.strokeStyle=human?'#eefff5':labelColor(label);ctx.lineWidth=human?1.5:1;
       if(!aggregate&&view==='raw-score'){ctx.globalAlpha=.12;ctx.fillStyle=human?labelColor(label):'rgb('+rgb.join(',')+')';ctx.fillRect(x,y,size,size);ctx.globalAlpha=1;ctx.strokeStyle='rgb('+rgb.join(',')+')';}
       ctx.strokeRect(x,y,size,size);
@@ -717,7 +720,7 @@ async function refreshTrainingSummary() {
   $("trainingSummary").replaceChildren(node("div",{text:fmt(plan.corrected_tiles)+" confirmed tiles across "+fmt(plan.corrected_slides)+" slides"}),
     node("div",{text:fmt(plan.excluded_tiles)+" excluded tiles omitted from retraining"}),node("div",{text:fmt(plan.original_train_slides)+" original training slides included"}));return plan;
 }
-async function openTraining() {$("trainExecutorSelect").value=S.executor;$("trainDialog").showModal();await updateTrainPlan();}
+async function openTraining() {$("trainExecutorSelect").value=S.executor;await trainingWorkspace.open();}
 async function updateTrainPlan() {
   $("submitTraining").disabled=true;
   try {
@@ -748,8 +751,10 @@ function renderJobs() {
   const latest=active[0]||S.jobs[0];$("jobStatusLink").textContent=latest?(latest.kind==="train"?"Retraining":"Prediction")+" · "+latest.status+(latest.slurm_id?" · job "+latest.slurm_id:""):S.computeEnabled?'GPU jobs run in the background':'CPU review · file drafts need Save';
   if(!S.jobs.length){$("jobList").replaceChildren(node("div",{class:"empty-state",text:"No review jobs yet. Predict a slide or retrain after annotating."}));return;}
   $("jobList").replaceChildren(...S.jobs.map(job=>node("div",{class:"job-row",onclick:()=>showLogs(job.id)},[
-    node("div",{class:"job-row-title"},[node("span",{text:job.kind==="train"?"Retrain from human review":job.slide_name}),node("span",{class:"job-badge "+job.status,text:job.status+(job.total?" · "+(job.completed||0)+"/"+job.total+" · "+(job.failed||0)+" failed":"")})]),
+    node("div",{class:"job-row-title"},[node("span",{text:job.kind==="train"?(job.model_name||"Retrain from human review"):job.slide_name}),node("span",{class:"job-badge "+job.status,text:job.status+(job.total?" · "+(job.completed||0)+"/"+job.total+" · "+(job.failed||0)+" failed":"")})]),
     node("div",{class:"job-row-meta",text:"Threshold "+job.threshold+" · "+new Date(job.created_at).toLocaleString()+(job.slurm_id?" · Slurm "+job.slurm_id:"")}),
+    ...(job.training_mode?[node('div',{class:'job-row-meta',text:job.training_samples.length+' training samples · '+job.validation_samples.length+' validation samples · C: '+job.c_values.join(', ')})]:[]),
+    ...(job.candidates||[]).filter(c=>c.status==='failed').map(c=>node('div',{class:'job-row-meta',text:'C='+c.C+' failed: '+c.error})),
     ...(job.error?[node("div",{class:"job-row-meta",text:job.error})]:[])])));
 }
 async function showLogs(id) {S.selectedJob=id;const logs=await api("/api/jobs/"+id+"/logs");$("jobLogs").hidden=false;$("jobLogs").textContent=(logs.stdout||"Waiting for worker output…")+(logs.stderr?"\n\nErrors:\n"+logs.stderr:"");}
@@ -759,14 +764,14 @@ async function pollJobs() {
     for(const job of jobs) {
       const previous=S.knownJobs.get(job.id);S.knownJobs.set(job.id,job.status);
       if(previous&&previous!==job.status&&["completed","completed_with_errors"].includes(job.status)) {
-        const boot=await api("/api/bootstrap");S.models=boot.models;fillModels(job.kind==="train"?job.id:null);
+        const boot=await api("/api/bootstrap");S.models=boot.models;fillModels(job.kind==="train"&&!job.training_mode?job.id:null);trainingWorkspace.results();
         toast(job.kind==="train"?"New reviewed SVC is ready. Select it to predict a slide.":"New predictions are ready"+(job.failed?" · "+job.failed+" slides failed; inspect Jobs":"."),Boolean(job.failed));
         if(job.kind==="predict")S.refreshQueue=true;
         if(job.kind==="predict"&&(job.slide_id===S.detail?.id||job.slide_ids?.includes(S.detail?.id)))S.refreshPrediction=true;
       }
       if(previous&&previous!==job.status&&job.status==="failed")toast("GPU job failed: "+(job.error||"Open Jobs to inspect the logs."),true);
     }
-    S.jobs=jobs;renderJobs();updateButtons();
+    S.jobs=jobs;renderJobs();updateButtons();trainingWorkspace.counts();
     if(S.refreshQueue&&!S.queueBusy&&!S.datasetBusy){S.refreshQueue=false;await refreshQueue();}
     await pollBulk();
     if(S.refreshPrediction&&!S.saving&&!S.pendingPolygon&&!S.draft.length&&!S.loading&&!S.datasetBusy&&S.detail){S.refreshPrediction=false;await loadSlide(S.detail.id,true);}
@@ -907,8 +912,8 @@ function inspectHover(event) {
   else text+=' · ≥ '+S.liveThreshold.toFixed(2)+' → medulla';$('hoverInfo').textContent=text;
 }
 function predictionOptions(){
-  const ids=['predictionView','aggregationMethod','gaussianSigma','rasterResolution','crfStrength','crfRadius','crfIterations'];
-  return {view:$('predictionView').value,method:$('aggregationMethod').value,sigma:Number($('gaussianSigma').value),resolution:Number($('rasterResolution').value),strength:Number($('crfStrength').value),radius:Number($('crfRadius').value),iterations:Number($('crfIterations').value),classification_threshold:S.liveThreshold??S.detail?.prediction_threshold??0,boundaries:$('tileBoundaries').checked,controls:Object.fromEntries(ids.map(id=>[id,$(id).value]))};
+  const ids=['predictionView','aggregationMethod','gaussianSigma','rasterResolution','crfStrength','crfRadius','crfIterations','heatmapPalette','heatmapLow','heatmapMid','heatmapHigh'];
+  return {heatmap_palette:$('heatmapPalette').value,heatmap_low:$('heatmapLow').value,heatmap_mid:$('heatmapMid').value,heatmap_high:$('heatmapHigh').value,view:$('predictionView').value,method:$('aggregationMethod').value,sigma:Number($('gaussianSigma').value),resolution:Number($('rasterResolution').value),strength:Number($('crfStrength').value),radius:Number($('crfRadius').value),iterations:Number($('crfIterations').value),classification_threshold:S.liveThreshold??S.detail?.prediction_threshold??0,boundaries:$('tileBoundaries').checked,controls:Object.fromEntries(ids.map(id=>[id,$(id).value]))};
 }
 function initializeThreshold(){S.liveThreshold=S.detail.prediction_threshold;S.thresholdPreview=false;
   const [lo,hi]=S.detail.score_range;for(const id of ['liveThreshold','liveThresholdNumber']){$(id).min=Math.min(lo,S.liveThreshold)-.5;$(id).max=Math.max(hi,S.liveThreshold)+.5;$(id).value=S.liveThreshold;}}
@@ -920,6 +925,8 @@ function liveThreshold(value,preview=true){if(!Number.isFinite(value))return;S.l
   clearTimeout(refineTimer);if(preview&&$('aggregationMethod').value==='crf')refineTimer=setTimeout(()=>{S.thresholdPreview=false;updateMasks().catch(e=>toast(e.message,true));},220);
 }
 function updateFieldStatus(){const options=predictionOptions(),f=S.fieldInfo;
+  $('heatmapLegend').querySelector('i').style.background='linear-gradient(to right,'+PredictionField.palette(options).map(rgb=>'rgb('+rgb.join(',')+')').join(',')+')';
+  $('heatmapLegend').setAttribute('aria-label','Decision scores from low to high · '+options.heatmap_palette+' palette');
   $('heatmapLegend').hidden=!options.view.includes('score');$('heatmapMin').textContent=S.detail.score_range[0].toFixed(2);$('heatmapMax').textContent=S.detail.score_range[1].toFixed(2)+' · decision score';
   $('crfControls').hidden=options.method!=='crf';
   $('thresholdStatus').textContent='Preview only · ≥ threshold: medulla'+(options.method==='crf'&&S.thresholdPreview?' · refinement pending':'');
@@ -950,7 +957,9 @@ function wireEvents() {
   document.addEventListener("visibilitychange",()=>{
     if(document.hidden)navigationCache.cancel();else if(S.detail&&!S.loading)navigationCache.schedule(S.filtered,S.detail.id);
   });
-  annotations.setup();setupPanels();
+  annotations.setup();setupPanels();trainingWorkspace.setup();
+  $('heatmapPalette').onchange=()=>{S.maskKey=null;updateMasks().catch(e=>toast(e.message,true));schedulePreferences();};
+  for(const id of ['heatmapLow','heatmapMid','heatmapHigh'])$(id).oninput=()=>{$('heatmapPalette').value='custom';S.maskKey=null;updateMasks().catch(e=>toast(e.message,true));schedulePreferences();};
   $('liveThreshold').oninput=()=>liveThreshold(Number($('liveThreshold').value),true);
   $('liveThresholdNumber').oninput=()=>liveThreshold(Number($('liveThresholdNumber').value),true);
   $('liveThreshold').onchange=()=>liveThreshold(Number($('liveThreshold').value),false);

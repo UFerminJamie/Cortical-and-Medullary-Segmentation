@@ -37,6 +37,7 @@ from .wsi import WsiPool
 from .transport import ApiCompression, encode_view
 from .grid import describe_grid, grid_mask
 from .performance import RequestMetrics
+from .training import selected_labels, training_thumbnail
 
 logger = logging.getLogger("renal_review")
 
@@ -474,7 +475,35 @@ def create_app(config: Config | None = None, token: str | None = None) -> FastAP
             slide_ids=payload.get("slide_ids"),
             model_id=str(payload.get("model_id", "baseline")), threshold=float(payload.get("threshold", -1.0)),
             budget=int(payload.get("budget", 100000)), reviewer=actor(payload), pass_id=str(payload.get("pass_id", "pass-1")),
-            executor=payload.get("executor"))
+            executor=payload.get("executor"), training_samples=payload.get("training_samples"),
+            validation_samples=payload.get("validation_samples"), model_name=payload.get("model_name", ""),
+            c_values=payload.get("c_values"))
+
+    @app.get("/api/training/samples")
+    def training_samples():
+        rows = catalog.listing("pass-1")
+        for row in rows:
+            row["revision"] = row.get("revision", 0)
+            # Only corrected slides need tile reads to adjust the cheap prediction summary.
+            if row["prediction_available"] and (row.get("manual_tiles") or row.get("excluded_tiles")):
+                try:
+                    _, _, labels, _ = selected_labels(catalog, store, row)
+                    count = int(np.isin(labels, [0, 1]).sum())
+                    row["medulla_fraction"] = float((labels == 1).sum() / count) if count else None
+                except (ValueError, FileNotFoundError) as error:
+                    row.update(prediction_available=False, selection_error=str(error))
+        return rows
+
+    @app.get("/api/training/samples/{slide_id}/thumbnail")
+    def training_image(slide_id: str, prediction_id: str, revision: int = 0):
+        slide = catalog.slide(slide_id)
+        data, human, labels, _ = selected_labels(catalog, store, {"id": slide_id, "prediction_id": prediction_id, "revision": revision})
+        key = "training:" + signature(slide["wsi_path"], slide["pt_path"], slide["baseline_csv"]) + str((slide_id, prediction_id, revision))
+        cached = responses.get(key)
+        if cached is None:
+            cached = training_thumbnail(pool, slide, data, human, labels)
+            responses.put(key, cached, len(cached))
+        return Response(cached, media_type="image/jpeg", headers={"Cache-Control": "private, no-cache"})
 
     @app.get("/api/jobs")
     def job_list():

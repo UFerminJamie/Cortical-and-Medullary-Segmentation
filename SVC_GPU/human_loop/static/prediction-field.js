@@ -68,15 +68,24 @@ const PredictionField = (() => {
     }
     for(const p of f.active)labels[p]=Number(q[p]>=.5);
   }
-  // Cividis-like, color-vision-friendly blue/yellow ramp; scaling is display only.
-  function color(score,range) {
+  // Palette changes affect display only, never scores or classification.
+  function palette(options={}) {
+    const presets={cividis:[[0,32,77],[65,82,109],[128,124,116],[190,174,108],[255,233,69]],
+      'blue-red':[[30,80,210],[245,245,245],[210,35,45]],viridis:[[68,1,84],[33,145,140],[253,231,37]]};
+    if(options.heatmap_palette==='custom')return [options.heatmap_low,options.heatmap_mid,options.heatmap_high].map((hex,i)=>{
+      const value=/^#[0-9a-f]{6}$/i.test(hex||'')?hex:['#2455d6','#f5f5f5','#d2232d'][i];
+      return [1,3,5].map(start=>parseInt(value.slice(start,start+2),16));});
+    return presets[options.heatmap_palette]||presets.cividis;
+  }
+  function color(score,range,options={}) {
     const t=Math.max(0,Math.min(1,(score-range[0])/Math.max(.001,range[1]-range[0]))),
-      stops=[[0,32,77],[65,82,109],[128,124,116],[190,174,108],[255,233,69]],u=t*4,i=Math.min(3,Math.floor(u));
+      stops=palette(options),u=t*(stops.length-1),i=Math.min(stops.length-2,Math.floor(u));
     return stops[i].map((v,c)=>Math.round(v+(stops[i+1][c]-v)*(u-i)));
   }
   function pixels(f,labels,options) {
     const rgba=new Uint8ClampedArray(labels.length*4),area=[0,0],range=f.detail.score_range,displayed=new Int8Array(labels.length);displayed.fill(-1);
-    if(!f.palette){f.palette=new Uint8Array(1024*3);for(let i=0;i<1024;i++)f.palette.set(color(range[0]+i/1023*(range[1]-range[0]),range),i*3);}
+    const paletteKey=JSON.stringify(palette(options));
+    if(f.paletteKey!==paletteKey){f.paletteKey=paletteKey;f.palette=new Uint8Array(1024*3);for(let i=0;i<1024;i++)f.palette.set(color(range[0]+i/1023*(range[1]-range[0]),range,options),i*3);}
     const span=Math.max(.001,range[1]-range[0]);
     for(const p of f.active) {
       let label=labels[p],manual=false;
@@ -110,6 +119,6 @@ const PredictionField = (() => {
     for(let p=0;p<mask.length;p++)if(pixels[p*4+3]>=128)mask[p]=pixels[p*4]+(pixels[p*4+1]<<8)+(pixels[p*4+2]<<16);
     return mask;
   }
-  return {create,classify,color,pixels,visit,tissueMask};
+  return {create,classify,color,palette,pixels,visit,tissueMask};
 })();
 if(typeof module!=='undefined')module.exports=PredictionField;

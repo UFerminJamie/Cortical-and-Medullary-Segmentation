@@ -303,3 +303,10 @@ There is no durable SQL database path: cache `index.sqlite3` is disposable. Use 
 | SSH / access failure | Confirm an active allocation, compute hostname, tunnel, and token link |
 
 Executed checks and limitations: [docs/validation.md](docs/validation.md).
+## Selected-sample GPU training
+
+Use **Train Model** to name a search, select disjoint training and validation samples
+from sortable WSI thumbnails, and submit an SVC C grid through Slurm. Compare
+candidate metrics and confusion matrices, then choose a model for prediction.
+See [the training workflow and records](docs/train-model.md). Heatmap colors are
+configurable, and polygon annotations now load only when requested.
